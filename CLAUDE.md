@@ -74,7 +74,7 @@ controles del sidebar.
 src/
   components/       componentes de UI (Sidebar, BlackHoleCanvas, ...)
   physics/          métricas y fórmulas puras, sin dependencias de React/three
-  store/            estado global (zustand) de los parámetros de simulación (desde PR 3)
+  store/            estado global (zustand) de los parámetros de simulación
 ```
 
 El módulo `physics/` debe mantenerse como funciones puras testeables sin DOM ni three.js,
@@ -89,8 +89,14 @@ clasificación del caso) de forma aislada del render.
 2. ✅ **Módulo `physics/`**: fórmulas de Schwarzschild/Reissner–Nordström/Kerr/Kerr–Newman
    (horizontes, ergosfera, ISCO, esfera de fotones) + tests de vitest. Ver la nota de
    alcance más arriba sobre el caso Kerr–Newman general en ISCO/esfera de fotones.
-3. Sidebar funcional: sliders de masa/spin/carga conectados a zustand, con la
-   clasificación derivada (tabla de arriba) mostrada en vivo.
+3. ✅ **Sidebar funcional**: sliders de masa/spin/carga (`spinRatio`/`chargeRatio`
+   normalizados como a/M y Q/M, independientes de la masa) conectados a zustand, con
+   la clasificación derivada (tabla de arriba) mostrada en vivo — o el aviso de
+   singularidad desnuda cuando a² + Q² > M². `BlackHoleCanvas` ya lee el store: el
+   horizonte de eventos usa el radio real (`horizonRadii`, no se renderiza si no hay
+   horizonte) y el radio interno del disco usa la ISCO real cuando existe forma
+   cerrada (Schwarzschild/Kerr), con el múltiplo aproximado del horizonte como
+   fallback para los casos con carga.
 4. Shader de lente gravitacional (ray marching de geodésicas nulas) contra una imagen
    de fondo equirectangular — caso Schwarzschild primero (deflexión radial pura).
 5. Extender el shader a Kerr/Kerr–Newman (frame dragging, ergosfera) — aproximación
