@@ -1,10 +1,11 @@
-import { OrbitControls, Stars } from '@react-three/drei'
+import { OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
 import * as THREE from 'three'
 import { horizonRadii } from '../../physics/metric'
 import { iscoRadius } from '../../physics/orbits'
 import { useBlackHoleParams } from '../../store/blackHoleStore'
+import { LensedBackground } from './LensedBackground'
 
 const DISK_PARTICLE_COUNT = 8000
 const DISK_THICKNESS = 0.15
@@ -89,15 +90,6 @@ function AccretionDisk({ innerRadius, outerRadius }: { innerRadius: number; oute
   )
 }
 
-function EventHorizon({ radius }: { radius: number }) {
-  return (
-    <mesh>
-      <sphereGeometry args={[radius, 64, 64]} />
-      <meshBasicMaterial color="#000000" />
-    </mesh>
-  )
-}
-
 export function BlackHoleCanvas() {
   const params = useBlackHoleParams()
   const horizons = horizonRadii(params)
@@ -108,17 +100,15 @@ export function BlackHoleCanvas() {
   const innerRadius = iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2
   const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
 
+  // The lensing shader itself renders the shadow (which is larger than the
+  // true horizon — the photon capture radius, 3√3M ≈ 5.2M vs. 2M — that's
+  // the real "black hole photo" look), so there's no separate horizon mesh
+  // to draw. For a naked singularity (horizons === null) it just never
+  // captures light — see LensedBackground/physics/lensing.ts.
   return (
     <Canvas camera={{ position: [0, 18, 39], fov: 50 }}>
-      <color attach="background" args={['#000000']} />
-      {/*
-        Placeholder starfield standing in for the background galaxy image
-        that the gravitational lensing shader will bend, once it lands.
-      */}
-      <Stars radius={80} depth={40} count={4000} factor={2} fade />
+      <LensedBackground params={params} horizonRadius={horizons?.outer ?? 1e-6} />
       <ambientLight intensity={0.15} />
-      {/* No horizon to render for a naked singularity (a² + Q² > M²). */}
-      {horizons && <EventHorizon radius={horizons.outer} />}
       <AccretionDisk
         key={`${innerRadius.toFixed(3)}-${outerRadius.toFixed(3)}`}
         innerRadius={innerRadius}

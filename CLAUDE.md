@@ -97,8 +97,22 @@ clasificación del caso) de forma aislada del render.
    horizonte) y el radio interno del disco usa la ISCO real cuando existe forma
    cerrada (Schwarzschild/Kerr), con el múltiplo aproximado del horizonte como
    fallback para los casos con carga.
-4. Shader de lente gravitacional (ray marching de geodésicas nulas) contra una imagen
-   de fondo equirectangular — caso Schwarzschild primero (deflexión radial pura).
+4. ✅ **Shader de lente gravitacional**: `LensedBackground` reemplaza el placeholder
+   `Stars` por una esfera enorme (radio 500) con un fragment shader custom, con una
+   textura equirectangular procedural (canvas 2D: starfield + una mancha de galaxia
+   lejana, generada una vez, sin assets externos) como fondo. El shader integra por
+   RK4 la ecuación de geodésica nula de Schwarzschild d²u/dφ² + u = 3Mu² (u = 1/r) por
+   píxel, reconstruyendo el rayo desde la posición mundial del fragmento en la esfera
+   menos la posición de la cámara — no hace falta matriz de proyección inversa porque
+   la esfera ya está transformada por las matrices normales de three.js. La misma
+   integración vive primero en `src/physics/lensing.ts` (`traceSchwarzschildRay`),
+   testeada con vitest (incluye el chequeo contra la fórmula de campo débil δφ ≈ 4M/b
+   y el radio crítico de captura 3√3 M) antes de portarse a GLSL — el shader es una
+   traducción fiel de esa función ya verificada. El disco de acreción sigue siendo
+   geometría de partículas normal (no lensed) por ahora; lensear el disco en sí queda
+   para cuando se trabaje el PR 6.
+5. Extender el shader a Kerr/Kerr–Newman (frame dragging, ergosfera) — aproximación
+   numérica del término de spin en el integrador.
 5. Extender el shader a Kerr/Kerr–Newman (frame dragging, ergosfera) — aproximación
    numérica del término de spin en el integrador.
 6. Disco de acreción con gradiente de temperatura físico + beaming Doppler y corrimiento
