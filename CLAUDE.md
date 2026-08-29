@@ -14,7 +14,18 @@ equations en tiempo real no es viable en un navegador). El enfoque es:
 
 - **Geometría del agujero negro**: fórmulas cerradas de las métricas de Schwarzschild,
   Reissner–Nordström, Kerr y Kerr–Newman (radio de horizonte(s), ergosfera, ISCO, radio
-  de la esfera de fotones) como funciones puras — ver `src/physics` (desde el PR 2).
+  de la esfera de fotones) como funciones puras — ver `src/physics`. Unidades
+  geometrizadas (G = c = 1): masa, spin y carga comparten unidad de longitud, y todos
+  los radios se expresan en esa misma unidad.
+  - Horizontes y ergosfera (ecuatorial) tienen forma cerrada general para
+    Kerr–Newman, de la que Schwarzschild/Reissner–Nordström/Kerr son casos
+    particulares (spin y/o carga en cero).
+  - Esfera de fotones e ISCO tienen forma cerrada para Schwarzschild y Kerr (spin
+    ≠ 0, carga = 0) y, para la esfera de fotones, también para Reissner–Nordström
+    (carga ≠ 0, spin = 0). El caso Kerr–Newman general (spin y carga ambos ≠ 0)
+    no tiene una forma cerrada simple para ninguna de las dos — requeriría resolver
+    una cuártica numéricamente — así que `photonSphereRadius`/`iscoRadius` devuelven
+    `null` ahí; queda pendiente si en algún momento hace falta.
 - **Lente gravitacional**: no es post-procesado con una lente óptica aproximada, sino
   ray marching de geodésicas nulas en un fragment shader (WebGL/GLSL vía
   `shaderMaterial` de r3f) contra una textura equirectangular de fondo. Es paralelizable
@@ -62,7 +73,7 @@ controles del sidebar.
 ```
 src/
   components/       componentes de UI (Sidebar, BlackHoleCanvas, ...)
-  physics/          métricas y fórmulas puras, sin dependencias de React/three (desde PR 2)
+  physics/          métricas y fórmulas puras, sin dependencias de React/three
   store/            estado global (zustand) de los parámetros de simulación (desde PR 3)
 ```
 
@@ -72,11 +83,12 @@ clasificación del caso) de forma aislada del render.
 
 ## Roadmap de PRs
 
-1. **Scaffold** (este PR): Vite + React + TS + r3f/drei, escena placeholder (horizonte
+1. ✅ **Scaffold**: Vite + React + TS + r3f/drei, escena placeholder (horizonte
    de eventos, disco de partículas con caída Kepleriana aproximada, starfield de fondo
    como stand-in de la imagen galáctica real), sidebar shell, licencia MIT.
-2. Módulo `physics/`: fórmulas de Schwarzschild/Reissner–Nordström/Kerr/Kerr–Newman
-   (horizontes, ergosfera, ISCO, esfera de fotones) + tests de vitest.
+2. ✅ **Módulo `physics/`**: fórmulas de Schwarzschild/Reissner–Nordström/Kerr/Kerr–Newman
+   (horizontes, ergosfera, ISCO, esfera de fotones) + tests de vitest. Ver la nota de
+   alcance más arriba sobre el caso Kerr–Newman general en ISCO/esfera de fotones.
 3. Sidebar funcional: sliders de masa/spin/carga conectados a zustand, con la
    clasificación derivada (tabla de arriba) mostrada en vivo.
 4. Shader de lente gravitacional (ray marching de geodésicas nulas) contra una imagen
