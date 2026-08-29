@@ -2,19 +2,20 @@ import { OrbitControls, Stars } from '@react-three/drei'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
 import * as THREE from 'three'
+import { horizonRadii } from '../../physics/metric'
+import { iscoRadius } from '../../physics/orbits'
+import { useBlackHoleParams } from '../../store/blackHoleStore'
 
-const EVENT_HORIZON_RADIUS = 1.5
 const DISK_PARTICLE_COUNT = 8000
-const DISK_INNER_RADIUS = EVENT_HORIZON_RADIUS * 2
-const DISK_OUTER_RADIUS = EVENT_HORIZON_RADIUS * 7
 const DISK_THICKNESS = 0.15
+const DISK_OUTER_TO_INNER_RATIO = 3.5
 
 // Warm-to-white color ramp standing in for the disk's real temperature
-// gradient (blackbody spectrum), which arrives with the physics module.
+// gradient (blackbody spectrum) and Doppler beaming, which land in a later PR.
 const HOT_INNER_COLOR = new THREE.Color('#fff3d6')
 const COOL_OUTER_COLOR = new THREE.Color('#ff6a2c')
 
-function generatePlaceholderDiskAttributes() {
+function generateDiskAttributes(innerRadius: number, outerRadius: number) {
   const positions = new Float32Array(DISK_PARTICLE_COUNT * 3)
   const colors = new Float32Array(DISK_PARTICLE_COUNT * 3)
   const orbitalSpeeds = new Float32Array(DISK_PARTICLE_COUNT)
@@ -22,26 +23,22 @@ function generatePlaceholderDiskAttributes() {
   const angles = new Float32Array(DISK_PARTICLE_COUNT)
 
   for (let i = 0; i < DISK_PARTICLE_COUNT; i++) {
-    const r = THREE.MathUtils.lerp(
-      DISK_INNER_RADIUS,
-      DISK_OUTER_RADIUS,
-      Math.random() ** 0.5,
-    )
+    const r = THREE.MathUtils.lerp(innerRadius, outerRadius, Math.random() ** 0.5)
     const theta = Math.random() * Math.PI * 2
-    const z = (Math.random() - 0.5) * DISK_THICKNESS * (r / DISK_OUTER_RADIUS)
+    const z = (Math.random() - 0.5) * DISK_THICKNESS * (r / outerRadius)
 
     radii[i] = r
     angles[i] = theta
     // Placeholder Keplerian-like falloff (v ~ 1/sqrt(r)): inner particles
-    // orbit faster than outer ones, foreshadowing the real rotation curve
-    // that lands with the physics module.
+    // orbit faster than outer ones, foreshadowing the real orbital velocity
+    // (frame-dragging included) that lands with the lensing shader.
     orbitalSpeeds[i] = 1 / Math.sqrt(r)
 
     positions[i * 3] = r * Math.cos(theta)
     positions[i * 3 + 1] = z
     positions[i * 3 + 2] = r * Math.sin(theta)
 
-    const t = (r - DISK_INNER_RADIUS) / (DISK_OUTER_RADIUS - DISK_INNER_RADIUS)
+    const t = (r - innerRadius) / (outerRadius - innerRadius)
     const color = HOT_INNER_COLOR.clone().lerp(COOL_OUTER_COLOR, t)
     colors[i * 3] = color.r
     colors[i * 3 + 1] = color.g
@@ -51,12 +48,14 @@ function generatePlaceholderDiskAttributes() {
   return { positions, colors, orbitalSpeeds, radii, angles }
 }
 
-function AccretionDisk() {
+function AccretionDisk({ innerRadius, outerRadius }: { innerRadius: number; outerRadius: number }) {
   const pointsRef = useRef<THREE.Points>(null)
-  // Per-particle simulation state, generated once. It's only ever read/mutated
-  // inside useFrame — never during render — so a plain ref (not state/memo)
-  // is the right home for it, and in-place mutation is expected.
-  const dataRef = useRef(generatePlaceholderDiskAttributes())
+  // Per-particle simulation state, generated once per mount. It's only ever
+  // read/mutated inside useFrame — never during render — so a plain ref (not
+  // state/memo) is the right home for it, and in-place mutation is expected.
+  // The component remounts (via the `key` its parent sets) whenever
+  // innerRadius/outerRadius change, which regenerates this from scratch.
+  const dataRef = useRef(generateDiskAttributes(innerRadius, outerRadius))
 
   useFrame((_, delta) => {
     const geometry = pointsRef.current?.geometry
@@ -90,18 +89,27 @@ function AccretionDisk() {
   )
 }
 
-function EventHorizon() {
+function EventHorizon({ radius }: { radius: number }) {
   return (
     <mesh>
-      <sphereGeometry args={[EVENT_HORIZON_RADIUS, 64, 64]} />
+      <sphereGeometry args={[radius, 64, 64]} />
       <meshBasicMaterial color="#000000" />
     </mesh>
   )
 }
 
 export function BlackHoleCanvas() {
+  const params = useBlackHoleParams()
+  const horizons = horizonRadii(params)
+
+  // iscoRadius is only a closed form for Schwarzschild/Kerr (charge = 0, see
+  // physics/orbits.ts); Reissner-Nordström/Kerr-Newman fall back to an
+  // approximate multiple of the horizon until that closed form exists.
+  const innerRadius = iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2
+  const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
+
   return (
-    <Canvas camera={{ position: [0, 12, 26], fov: 50 }}>
+    <Canvas camera={{ position: [0, 18, 39], fov: 50 }}>
       <color attach="background" args={['#000000']} />
       {/*
         Placeholder starfield standing in for the background galaxy image
@@ -109,9 +117,14 @@ export function BlackHoleCanvas() {
       */}
       <Stars radius={80} depth={40} count={4000} factor={2} fade />
       <ambientLight intensity={0.15} />
-      <EventHorizon />
-      <AccretionDisk />
-      <OrbitControls enableDamping minDistance={3} maxDistance={40} />
+      {/* No horizon to render for a naked singularity (a² + Q² > M²). */}
+      {horizons && <EventHorizon radius={horizons.outer} />}
+      <AccretionDisk
+        key={`${innerRadius.toFixed(3)}-${outerRadius.toFixed(3)}`}
+        innerRadius={innerRadius}
+        outerRadius={outerRadius}
+      />
+      <OrbitControls enableDamping minDistance={3} maxDistance={60} />
     </Canvas>
   )
 }
