@@ -331,11 +331,27 @@ const FRAGMENT_SHADER = /* glsl */ `
     // and vanishes exactly on the spin axis, so ignoring spin is also the
     // *most accurate* approximation available precisely in the regime where
     // the full integrator is least reliable.
+    //
+    // sin(θ_min) alone isn't enough, though: it only measures *direction*
+    // (L vs Q), not whether the ray ever actually gets near the black hole.
+    // Every ray in the vertical plane through the camera and the spin axis
+    // has L = 0 exactly, regardless of how far above/below the hole it's
+    // aimed — without a distance check that entire plane (a wedge across
+    // the whole frame once projected) was routed to the Schwarzschild
+    // fallback, confirmed by color-coding which tracer handled each pixel:
+    // the "jet"-looking wedge was that fallback region sampling a different,
+    // coincidentally darker patch of sky than the true Kerr result next to
+    // it — not a captured/shadow effect at all. Requiring the impact
+    // parameter itself to be small (i.e. the ray is actually headed
+    // close to the hole) keeps the fallback confined to near the shadow,
+    // where the pole singularity is actually reachable.
     vec3 impactVec = cross(uCameraPos, rd);
     float LCheck = dot(impactVec, SPIN_AXIS);
     float QCheck = max(0.0, dot(impactVec, impactVec) - LCheck * LCheck);
     float sinThetaMinEstimate = abs(LCheck) / sqrt(LCheck * LCheck + QCheck + 1e-9);
-    bool nearPolarTrajectory = sinThetaMinEstimate < 0.3;
+    float impactParameterSq = LCheck * LCheck + QCheck;
+    float closeRadius = 20.0 * uMass;
+    bool nearPolarTrajectory = sinThetaMinEstimate < 0.3 && impactParameterSq < closeRadius * closeRadius;
 
     if ((uSpin < 1e-4 && uCharge < 1e-4) || nearPolarTrajectory) {
       vec3 finalDir = traceSchwarzschild(uCameraPos, rd, captured);

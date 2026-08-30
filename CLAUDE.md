@@ -197,6 +197,24 @@ clasificación del caso) de forma aislada del render.
        Verificado en el navegador con spin extremal (1.0) y masa mínima
        (0.3) combinados, en varios ángulos de cámara incluyendo vista
        casi-polar — sin línea, sin cadena de imágenes, sin errores.
+     - Ese mismo fix, sin embargo, introdujo un bug propio (reportado como
+       "¿esto son jets?" en review — no lo son, no hay jets relativistas
+       modelados, eso es MHD/electromagnético): sin(θ_min) por sí solo no
+       distingue *dirección* de *distancia*. Todo rayo en el plano vertical
+       que contiene la cámara y el eje de spin tiene L=0 exacto, sin
+       importar qué tan lejos del agujero apunte — sin un chequeo de
+       distancia, ese plano entero (una cuña gigante atravesando toda la
+       pantalla en perspectiva) se enviaba al fallback de Schwarzschild.
+       Diagnosticado coloreando qué tracer atendió cada píxel (rojo =
+       capturado, azul = fallback, verde = Kerr completo): la cuña oscura
+       que parecía un jet no era sombra en absoluto — era la región del
+       fallback muestreando una parte del cielo distinta (y coincidentemente
+       más oscura) que la que el Kerr real hubiera mostrado ahí. Fix: exigir
+       además que el parámetro de impacto total (L²+Q) sea chico (rayo
+       realmente apuntando cerca del agujero, `< (20M)²`) antes de activar
+       el fallback — así se confina al entorno real de la sombra, donde la
+       aproximación tiene sentido, en vez de a cualquier rayo en ese plano
+       sin importar qué tan lejos pase.
    - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
      del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
      Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se
