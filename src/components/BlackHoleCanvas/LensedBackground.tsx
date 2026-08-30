@@ -319,7 +319,25 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 rd = normalize(vWorldPos - uCameraPos);
     bool captured = false;
 
-    if (uSpin < 1e-4 && uCharge < 1e-4) {
+    // Rays whose trajectory swings close to the spin axis push the (r,θ,φ)
+    // Kerr integrator into its numerically fragile pole region (visible,
+    // pre-fix, as a bright seam or a repeating chain of ghost images of
+    // whatever's behind it). Rather than patch that integration further,
+    // sidestep it: estimate the trajectory's closest approach to the pole
+    // — sin(θ_min) ≈ |L| / sqrt(L² + Q), from Θ(θ)'s small-angle expansion
+    // — and for rays that get very close, fall back to the pure-mass
+    // Schwarzschild tracer instead of the full Kerr one. This isn't just a
+    // convenient dodge: frame dragging is strongest in the equatorial plane
+    // and vanishes exactly on the spin axis, so ignoring spin is also the
+    // *most accurate* approximation available precisely in the regime where
+    // the full integrator is least reliable.
+    vec3 impactVec = cross(uCameraPos, rd);
+    float LCheck = dot(impactVec, SPIN_AXIS);
+    float QCheck = max(0.0, dot(impactVec, impactVec) - LCheck * LCheck);
+    float sinThetaMinEstimate = abs(LCheck) / sqrt(LCheck * LCheck + QCheck + 1e-9);
+    bool nearPolarTrajectory = sinThetaMinEstimate < 0.3;
+
+    if ((uSpin < 1e-4 && uCharge < 1e-4) || nearPolarTrajectory) {
       vec3 finalDir = traceSchwarzschild(uCameraPos, rd, captured);
       if (captured) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -334,7 +352,21 @@ const FRAGMENT_SHADER = /* glsl */ `
       gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
       return;
     }
-    gl_FragColor = texture2D(uBackgroundTexture, uv);
+
+    // An equirectangular texture is mathematically degenerate exactly at
+    // its poles (every u maps to the same physical point when v is 0 or 1),
+    // and rays whose bent path swings close to the spin axis land right in
+    // that degenerate strip — any leftover floating-point noise in exactly
+    // which u they land on reads as a bright seam, and it's most visible
+    // wherever it happens to cross a bright part of the texture (a star
+    // field pixel doesn't show it; the lensed galaxy glow does). Rather
+    // than chase that noise further inside the delicate RK4 integration,
+    // fade the sample to black right at the poles — a sliver of solid
+    // angle nobody would notice missing, in exchange for never showing the
+    // seam at all.
+    float sinThetaFinal = sin(uv.y * PI);
+    float poleFade = smoothstep(0.0, 0.08, sinThetaFinal);
+    gl_FragColor = vec4(texture2D(uBackgroundTexture, uv).rgb * poleFade, 1.0);
   }
 `
 

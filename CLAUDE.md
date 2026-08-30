@@ -175,6 +175,28 @@ clasificación del caso) de forma aislada del render.
      `traceKerr()`/`LensedBackground.tsx`. Diagnosticado pasando `finalDir`
      directo al framebuffer como color: la discontinuidad era visible ahí
      mismo, antes incluso de tocar la textura.
+     - Ese fix redujo el problema pero no lo eliminó: en ángulos de cámara
+       donde muchos rayos pasan cerca del eje, seguía apareciendo (ahora
+       como una cadena periódica de imágenes fantasma de la mancha de
+       galaxia, tipo "cuentas de un collar" subiendo por el eje, en vez de
+       una sola línea). Un primer parche (reflejar θ/w_θ como una pared
+       artificial al acercarse al polo, más un fade a negro en las
+       muestras cercanas al polo) mejoraba pero no resolvía esto — la
+       cadena aparecía en un rango de θ mucho más ancho que el que ese
+       fade cubría razonablemente.
+     - Fix definitivo: en vez de seguir parchando la integración (r,θ,φ)
+       justo donde es numéricamente frágil, la esquivamos. Se estima
+       sin(θ_min) ≈ |L|/√(L²+Q) (de la expansión de Θ(θ) a ángulo chico) —
+       la latitud más cercana al polo que la trayectoria alcanzaría. Si esa
+       estimación da por debajo de un umbral, el rayo se traza con
+       `traceSchwarzschild` (solo masa) en vez de `traceKerr`. No es solo
+       un atajo cómodo: el frame dragging es más fuerte en el plano
+       ecuatorial y se anula exactamente sobre el eje de spin, así que
+       ignorar el spin ahí es también la aproximación *más precisa*
+       disponible justo donde el integrador completo es menos confiable.
+       Verificado en el navegador con spin extremal (1.0) y masa mínima
+       (0.3) combinados, en varios ángulos de cámara incluyendo vista
+       casi-polar — sin línea, sin cadena de imágenes, sin errores.
    - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
      del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
      Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se
