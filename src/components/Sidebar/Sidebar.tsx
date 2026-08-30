@@ -79,6 +79,12 @@ export function Sidebar() {
       </label>
 
       <p className="sidebar__note">
+        La rotación del disco se muestra acelerada (×15) para que se note a esta
+        escala visual — la velocidad orbital real es Kepleriana correcta, pero
+        del orden de minutos por vuelta incluso en el borde interno.
+      </p>
+
+      <p className="sidebar__note">
         Controles de calidad (balance entre fidelidad del shader y rendimiento en
         GPUs modestas) se agregan en un próximo PR.
       </p>

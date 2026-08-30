@@ -177,6 +177,17 @@ clasificación del caso) de forma aislada del render.
      mismo, antes incluso de tocar la textura.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
    fidelidad vs. rendimiento en GPUs modestas.
+8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
+   separada del shader de lente — no pasa por el raytracer, así que no se deforma
+   ni aparece duplicado arriba/abajo del agujero (el look clásico de la foto de
+   M87/Sgr A*, o de Interstellar). Para lograrlo hace falta que el mismo rayo
+   curvado del shader detecte cuándo cruza el plano del disco (z=0 en coordenadas
+   del disco, entre `innerRadius` y `outerRadius`) durante la integración, y
+   samplee el color/temperatura del disco ahí en vez de (o además de) la textura
+   de fondo — probablemente usando un mapa de temperatura precalculado en vez de
+   volver a generar 8000 partículas dentro del shader. Pedido explícito del
+   usuario tras revisar el PR 6 (el disco "queda mediocre" al no deformarse con
+   el resto de la imagen).
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
