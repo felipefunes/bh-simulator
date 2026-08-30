@@ -137,8 +137,24 @@ clasificación del caso) de forma aislada del render.
    - Pendiente, no bloqueante: visualizar la ergosfera (la fórmula general con
      dependencia en θ ya se puede derivar de `ergosphereEquatorialRadius`, pero no se
      implementó en este PR — el foco fue el shader).
-6. Disco de acreción con gradiente de temperatura físico + beaming Doppler y corrimiento
-   al rojo gravitacional.
+6. ✅ **Disco de acreción físico**: `src/physics/accretionDisk.ts` — perfil de
+   temperatura de Shakura–Sunyaev (T⁴ ∝ r⁻³(1−√(r_in/r)), pico en r=49/36 r_in),
+   color de cuerpo negro (aproximación polinómica, tipo Tanner Helland), velocidad
+   orbital local v(r)=√(M/(r−2M)) (da exactamente c en la esfera de fotones y 0.5c
+   en la ISCO — dos checkpoints conocidos) y el factor combinado de corrimiento
+   Doppler + gravitacional 1+z = γ(1−β·n̂)/√(1−2M/r) (Luminet 1979). Todo testeado
+   en vitest antes de portarse a GLSL, mismo patrón que PRs anteriores.
+   `AccretionDisk` ahora usa un `shaderMaterial` propio (no el `pointsMaterial` de
+   antes): cada partícula lleva su temperatura base y su dirección de velocidad
+   tangencial como atributos, y el vertex shader recalcula color y brillo cada
+   frame según la posición actual de la cámara — el beaming es visible como una
+   asimetría de brillo entre el lado que se acerca y el que se aleja. Aproximación
+   documentada: las fórmulas usan solo masa (Schwarzschild), igual que el shader de
+   lente antes del PR 5 — extender a Kerr/Kerr–Newman queda como trabajo futuro.
+   El disco se ensanchó de 3.5× a 10× el radio interno (y la cámara se alejó a
+   juego) porque con el radio anterior toda la temperatura visible quedaba en el
+   mismo extremo caliente/azul de la curva de cuerpo negro, sin espacio para
+   enfriarse hacia el naranja.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
    fidelidad vs. rendimiento en GPUs modestas.
 

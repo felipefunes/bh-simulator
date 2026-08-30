@@ -316,7 +316,7 @@ export function LensedBackground({
       uSpin: { value: params.spin },
       uCharge: { value: params.charge },
       uHorizonRadius: { value: horizonRadius },
-      uMaxRadius: { value: 100 * params.mass },
+      uMaxRadius: { value: 300 * params.mass },
     }),
     [texture, params.mass, params.spin, params.charge, horizonRadius],
   )
@@ -329,7 +329,7 @@ export function LensedBackground({
     material.uniforms.uSpin.value = params.spin
     material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
-    material.uniforms.uMaxRadius.value = 100 * params.mass
+    material.uniforms.uMaxRadius.value = 300 * params.mass
   })
 
   return (

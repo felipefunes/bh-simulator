@@ -79,9 +79,8 @@ export function Sidebar() {
       </label>
 
       <p className="sidebar__note">
-        El disco de acreción con temperatura física (beaming Doppler, corrimiento al
-        rojo gravitacional) y la lente gravitacional sobre una imagen de fondo se
-        agregan en próximos PRs.
+        Controles de calidad (balance entre fidelidad del shader y rendimiento en
+        GPUs modestas) se agregan en un próximo PR.
       </p>
     </aside>
   )
