@@ -6,6 +6,13 @@ import { diskTemperature } from '../../physics/accretionDisk'
 const DISK_PARTICLE_COUNT = 8000
 const DISK_THICKNESS = 0.15
 const POINT_SIZE_SCALE = 260.0
+// Real Keplerian angular speeds at this scene's scale are on the order of
+// one rotation per minute even at the inner edge (and much slower further
+// out) — accurate, but far too slow to read as "rotating" in real time.
+// This speeds up the whole disk uniformly, so the differential falloff
+// between radii (inner faster than outer) is still physically shaped, just
+// time-compressed for legibility.
+const VISUAL_TIME_SCALE = 15
 
 function generateDiskAttributes(mass: number, innerRadius: number, outerRadius: number) {
   const positions = new Float32Array(DISK_PARTICLE_COUNT * 3)
@@ -22,8 +29,8 @@ function generateDiskAttributes(mass: number, innerRadius: number, outerRadius: 
 
     radii[i] = r
     angles[i] = theta
-    // Keplerian angular velocity Ω(r) = sqrt(M/r^3).
-    angularSpeeds[i] = Math.sqrt(mass / (r * r * r))
+    // Keplerian angular velocity Ω(r) = sqrt(M/r^3), sped up for legibility.
+    angularSpeeds[i] = Math.sqrt(mass / (r * r * r)) * VISUAL_TIME_SCALE
     baseTemperatures[i] = diskTemperature(innerRadius, r)
 
     positions[i * 3] = r * Math.cos(theta)
@@ -101,7 +108,15 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vColor;
 
   void main() {
-    gl_FragColor = vec4(vColor, 0.9);
+    // gl_PointCoord runs 0-1 across the square point sprite; without this,
+    // every particle renders as a hard-edged square ("confetti"), rather
+    // than a soft, round glow like a real point source.
+    vec2 centered = gl_PointCoord - vec2(0.5);
+    float distanceFromCenter = length(centered) * 2.0;
+    float alpha = smoothstep(1.0, 0.0, distanceFromCenter);
+    if (alpha <= 0.0) discard;
+
+    gl_FragColor = vec4(vColor, alpha * 0.9);
   }
 `
 

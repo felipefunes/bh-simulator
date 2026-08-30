@@ -136,14 +136,26 @@ export function traceKerrRay(
     const RmL = (L - a) * (L - a) + Q
     return 4 * r * P - 2 * (r - M) * RmL
   }
+  // Θ(θ) and its derivative divide by sin²θ/sin³θ, which blow up as θ
+  // approaches the poles. A genuine photon orbit with L≠0 never actually
+  // reaches sin θ = 0 (Θ goes negative first, forcing a turning point), but
+  // floating-point roundoff right at that boundary can send a stray ray
+  // through the singularity — this clamp leaves every real trajectory
+  // unaffected while avoiding NaN/Inf blow-ups for rays that pass close to
+  // the spin axis (empirically, without it, this produced a spurious bright
+  // line straight along the axis in the shader translation of this module).
+  const safeSin = (theta: number) => {
+    const s = Math.sin(theta)
+    return s >= 0 ? Math.max(s, 1e-3) : Math.min(s, -1e-3)
+  }
   const Theta = (theta: number) => {
     const c = Math.cos(theta)
-    const s = Math.sin(theta)
+    const s = safeSin(theta)
     return Q + c * c * (a * a - L * L / (s * s))
   }
   const Thetaprime = (theta: number) => {
     const c = Math.cos(theta)
-    const s = Math.sin(theta)
+    const s = safeSin(theta)
     return 2 * c * (L * L / (s * s * s) - a * a * s)
   }
 
@@ -154,7 +166,7 @@ export function traceKerrRay(
   let wth = Math.sign(rdTheta || 1) * Math.sqrt(Math.max(0, Theta(theta0)))
 
   const derivatives = (r: number, theta: number, wr: number, wth: number) => {
-    const sinTheta = Math.sin(theta)
+    const sinTheta = safeSin(theta)
     const sin2 = sinTheta * sinTheta
     const Delta = r * r - 2 * M * r + a * a + e2
     const P = r * r + a * a - a * L
@@ -163,6 +175,11 @@ export function traceKerrRay(
   }
 
   let escaped = false
+  // A real photon orbit with L≠0 turns around before reaching the pole
+  // (Θ(θ) hits zero first); a single RK4 step can overshoot past that
+  // turning point numerically right at the singularity. Reflect theta/wth
+  // like a wall there instead of letting the ray punch through.
+  const POLE_GUARD = 0.02
 
   for (let step = 0; step < maxSteps; step++) {
     const k1 = derivatives(r, theta, wr, wth)
@@ -175,6 +192,15 @@ export function traceKerrRay(
     phi += (dTau / 6) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
     wr += (dTau / 6) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3])
     wth += (dTau / 6) * (k1[4] + 2 * k2[4] + 2 * k3[4] + k4[4])
+
+    if (theta < POLE_GUARD) {
+      theta = 2 * POLE_GUARD - theta
+      wth = -wth
+    }
+    if (theta > Math.PI - POLE_GUARD) {
+      theta = 2 * (Math.PI - POLE_GUARD) - theta
+      wth = -wth
+    }
 
     if (!Number.isFinite(r) || !Number.isFinite(theta)) break
     if (r < horizonRadius) break

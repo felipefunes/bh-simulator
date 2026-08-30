@@ -155,6 +155,26 @@ clasificación del caso) de forma aislada del render.
    juego) porque con el radio anterior toda la temperatura visible quedaba en el
    mismo extremo caliente/azul de la curva de cuerpo negro, sin espacio para
    enfriarse hacia el naranja.
+   - Ajustes post-review: partículas del disco con sprite circular difuminado
+     (antes eran cuadrados duros — `gl_PointCoord` + `smoothstep` en el fragment
+     shader) y velocidad angular multiplicada ×15 solo para legibilidad visual
+     (`VISUAL_TIME_SCALE` en `AccretionDisk.tsx`) — la velocidad Keplariana real
+     a esta escala es de minutos por vuelta incluso en el borde interno.
+   - Bug encontrado en review visual: a spin alto aparecía una línea brillante
+     recorriendo toda la pantalla exactamente sobre el eje de spin (parecía un
+     "jet", pero no lo es — no hay jets relativistas modelados, eso es un
+     fenómeno electromagnético/MHD, no puramente gravitacional). Causa real:
+     el shader de Kerr reconstruía la dirección final como un vector cartesiano
+     (`sinθ·cosφ, sinθ·senφ, cosθ`) y volvía a extraer φ de ese vector con
+     `atan2` para muestrear la textura equirectangular — ese viaje de ida y
+     vuelta es exactamente donde una textura equirect tiene su singularidad de
+     polo: cuando sinθ→0, las componentes x/z son casi cero y `atan2` de dos
+     números casi-cero es numéricamente inestable. El fix fue samplear la
+     textura directamente desde θ/φ ya acumulados en la integración (nunca
+     pasar por la reconstrucción cartesiana) — ver el comment en
+     `traceKerr()`/`LensedBackground.tsx`. Diagnosticado pasando `finalDir`
+     directo al framebuffer como color: la discontinuidad era visible ahí
+     mismo, antes incluso de tocar la textura.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
    fidelidad vs. rendimiento en GPUs modestas.
 

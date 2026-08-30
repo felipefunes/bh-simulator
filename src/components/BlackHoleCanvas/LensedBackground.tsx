@@ -156,7 +156,34 @@ const FRAGMENT_SHADER = /* glsl */ `
     return normalize(e1Comp * e1 + e2Comp * e2);
   }
 
-  vec3 traceKerr(vec3 ro, vec3 rd, out bool captured) {
+  // Θ(θ) and its derivative divide by sin²θ/sin³θ, which blow up as a ray's
+  // θ approaches the poles (looking straight along the spin axis) — for a
+  // genuine photon orbit with L≠0 this never actually happens (Θ would go
+  // negative first, forcing a turning point well before the pole), but
+  // floating-point roundoff right at that boundary can still send a stray
+  // ray through the singularity, producing a visible bright line straight
+  // up/down the spin axis. Clamping keeps every real trajectory unaffected
+  // (they never get this close to sin θ = 0) while killing the artifact.
+  float safeSin(float theta) {
+    float s = sin(theta);
+    return s >= 0.0 ? max(s, 1e-3) : min(s, -1e-3);
+  }
+
+  // Returns the equirectangular UV to sample directly from (theta, phi),
+  // rather than reconstructing a Cartesian direction and re-deriving UV
+  // from it via atan2/acos. That round trip is where the pole artifact
+  // actually came from: for a ray whose bent path swings close to the spin
+  // axis, sin(theta) shrinks toward zero, so its Cartesian x/z components
+  // (built from sinTheta*cos(phi)/sinTheta*sin(phi)) become vanishingly
+  // small — and re-extracting phi from atan2 of two near-zero floats is
+  // exactly where floating-point noise blows up into a visible seam
+  // (confirmed by feeding finalDir straight to the framebuffer as a color:
+  // the seam showed up as a literal discontinuity in the direction vector
+  // itself, not in capture/escape or in the texture lookup). Sampling
+  // straight from the already-smooth, already-accumulated phi sidesteps
+  // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
+  // handles phi being outside [-π, π] for free.
+  vec2 traceKerr(vec3 ro, vec3 rd, out bool captured) {
     float M = uMass;
     float a = uSpin;
     float e2 = uCharge * uCharge;
@@ -189,7 +216,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     float Delta0 = r0 * r0 - 2.0 * M * r0 + a * a + e2;
     float R0 = P0 * P0 - Delta0 * ((L - a) * (L - a) + Q);
     float c0 = cos(theta0);
-    float s0 = sin(theta0);
+    float s0 = safeSin(theta0);
     float Th0 = Q + c0 * c0 * (a * a - L * L / (s0 * s0));
 
     float wr = sign(rdRadial) * sqrt(max(0.0, R0));
@@ -202,7 +229,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       // four times for the RK4 stages.
       float k1r = wr;
       float k1th = wth;
-      float s1 = sin(theta); float s12 = s1 * s1; float c1 = cos(theta);
+      float s1 = safeSin(theta); float s12 = s1 * s1; float c1 = cos(theta);
       float Delta1 = r * r - 2.0 * M * r + a * a + e2;
       float P1 = r * r + a * a - a * L;
       float RmL1 = (L - a) * (L - a) + Q;
@@ -216,7 +243,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth2 = wth + (D_TAU * 0.5) * k1dwth;
       float k2r = wr2;
       float k2th = wth2;
-      float s2_ = sin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
+      float s2_ = safeSin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
       float Delta2 = r2 * r2 - 2.0 * M * r2 + a * a + e2;
       float P2 = r2 * r2 + a * a - a * L;
       float RmL2 = (L - a) * (L - a) + Q;
@@ -230,7 +257,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth3 = wth + (D_TAU * 0.5) * k2dwth;
       float k3r = wr3;
       float k3th = wth3;
-      float s3_ = sin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
+      float s3_ = safeSin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
       float Delta3 = r3 * r3 - 2.0 * M * r3 + a * a + e2;
       float P3 = r3 * r3 + a * a - a * L;
       float RmL3 = (L - a) * (L - a) + Q;
@@ -244,7 +271,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth4 = wth + D_TAU * k3dwth;
       float k4r = wr4;
       float k4th = wth4;
-      float s4_ = sin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
+      float s4_ = safeSin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
       float Delta4 = r4 * r4 - 2.0 * M * r4 + a * a + e2;
       float P4 = r4 * r4 + a * a - a * L;
       float RmL4 = (L - a) * (L - a) + Q;
@@ -258,37 +285,46 @@ const FRAGMENT_SHADER = /* glsl */ `
       wr += (D_TAU / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
       wth += (D_TAU / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
 
-      if (r < uHorizonRadius || !(r == r)) { captured = true; return rd; }
+      // A real photon orbit with L≠0 turns around before ever reaching the
+      // pole (Θ(θ) hits zero first) — but a single RK4 step can overshoot
+      // past that turning point numerically near the singularity. Reflect
+      // theta/wth like a wall there instead of letting the ray punch
+      // through, which otherwise shows up as a bright seam along the spin
+      // axis.
+      const float POLE_GUARD = 0.02;
+      if (theta < POLE_GUARD) { theta = 2.0 * POLE_GUARD - theta; wth = -wth; }
+      if (theta > PI - POLE_GUARD) { theta = 2.0 * (PI - POLE_GUARD) - theta; wth = -wth; }
+
+      if (r < uHorizonRadius || !(r == r)) { captured = true; return vec2(0.0); }
       if (r > uMaxRadius) { escaped = true; break; }
     }
 
-    if (!escaped) { captured = true; return rd; }
+    if (!escaped) { captured = true; return vec2(0.0); }
 
     captured = false;
-    float sinThetaFinal = sin(theta);
-    vec3 finalDir = normalize(
-      xRef * (sinThetaFinal * cos(phi)) + yRef * (sinThetaFinal * sin(phi)) + SPIN_AXIS * cos(theta)
-    );
-    return finalDir;
+    return vec2(phi / (2.0 * PI) + 0.5, clamp(theta, 0.0, PI) / PI);
   }
 
   void main() {
     vec3 rd = normalize(vWorldPos - uCameraPos);
     bool captured = false;
-    vec3 finalDir;
 
     if (uSpin < 1e-4 && uCharge < 1e-4) {
-      finalDir = traceSchwarzschild(uCameraPos, rd, captured);
-    } else {
-      finalDir = traceKerr(uCameraPos, rd, captured);
+      vec3 finalDir = traceSchwarzschild(uCameraPos, rd, captured);
+      if (captured) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+      }
+      gl_FragColor = texture2D(uBackgroundTexture, equirectUv(finalDir));
+      return;
     }
 
+    vec2 uv = traceKerr(uCameraPos, rd, captured);
     if (captured) {
       gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
       return;
     }
-
-    gl_FragColor = texture2D(uBackgroundTexture, equirectUv(finalDir));
+    gl_FragColor = texture2D(uBackgroundTexture, uv);
   }
 `
 
