@@ -365,17 +365,59 @@ clasificación del caso) de forma aislada del render.
      trade-off es honesto, no gratis) mientras que "Alta" se ve tan limpio
      como (o mejor que) el default anterior — confirma que el control tiene
      efecto real, no es un placeholder.
-8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
-   separada del shader de lente — no pasa por el raytracer, así que no se deforma
-   ni aparece duplicado arriba/abajo del agujero (el look clásico de la foto de
-   M87/Sgr A*, o de Interstellar). Para lograrlo hace falta que el mismo rayo
-   curvado del shader detecte cuándo cruza el plano del disco (z=0 en coordenadas
-   del disco, entre `innerRadius` y `outerRadius`) durante la integración, y
-   samplee el color/temperatura del disco ahí en vez de (o además de) la textura
-   de fondo — probablemente usando un mapa de temperatura precalculado en vez de
-   volver a generar 8000 partículas dentro del shader. Pedido explícito del
-   usuario tras revisar el PR 6 (el disco "queda mediocre" al no deformarse con
-   el resto de la imagen).
+8. ✅ **Lensear el disco de acreción**. Reemplazo completo (decisión explícita del
+   usuario, no la opción "en capas" que hubiera mantenido el disco de partículas
+   sin deformar para la vista directa): se eliminó `AccretionDisk.tsx` (las 8000
+   partículas) por completo. Ahora el mismo rayo curvado de `traceSchwarzschild`/
+   `traceKerr` detecta, en cada paso de la integración, un cruce del plano
+   ecuatorial (θ=π/2 en Kerr; signo de la componente y de la posición 3D
+   reconstruida vía la base e1/e2 del propio rayo, en Schwarzschild — ver el
+   comentario de `traceSchwarzschildRay` en `physics/lensing.ts`) dentro de
+   `[innerRadius, outerRadius]`, interpola linealmente el radio/φ del cruce, y
+   si cae dentro del disco corta la integración ahí (igual que una captura) en
+   vez de seguir hacia la textura de fondo. El color en ese punto es completamente
+   analítico (perfil de temperatura de Shakura–Sunyaev + blackbody + Doppler,
+   las mismas fórmulas de `physics/accretionDisk.ts`, portadas a GLSL) — no hay
+   textura precalculada ni partículas, tal como sugería la nota original del
+   roadmap. La dirección tangencial (para el Doppler) se deriva de d(posición)/dφ
+   en la convención propia de `traceKerr` (xRef=[1,0,0], yRef=cross(spinAxis,xRef)),
+   no de la convención que usaban las partículas viejas — quedó documentado en
+   `diskColor()` porque un signo equivocado ahí habría invertido qué lado del
+   disco aparece más brillante (co-rotante con fotones prógrados, L>0).
+   - Física nueva testeada en vitest antes de portarse a GLSL, mismo patrón que
+     siempre: `kerrLensing.test.ts`/`lensing.test.ts` verifican que un rayo
+     apuntado (en espacio plano) a un punto conocido del plano ecuatorial
+     efectivamente reporta `diskHit` con el radio esperado, que un disco con
+     bordes que no contienen ese cruce cae de nuevo a escape/captura normal, y
+     que spin≠0 no cambia el plano de cruce (solo φ, por frame dragging). Se
+     extrajo `physics/vec3.ts` (antes duplicado dentro de `kerrLensing.ts`) para
+     que `lensing.ts` pudiera hacer la misma reconstrucción 3D sin repetir los
+     helpers.
+   - Bug serio encontrado en review visual: con el disco activado, **toda la
+     pantalla se volvía negra sólida** (sin estrellas, sin disco, nada) —
+     ni siquiera en la forma del disco, un negro uniforme en todo el frame.
+     Diagnosticado forzando primero el color de acierto (`diskHit`) a rojo puro
+     en vez de `diskColor(...)`: si el problema hubiera sido en el cálculo de
+     color (NaN, temperatura mal calculada) se habría visto rojo sólido en vez
+     de negro; en cambio seguía negro, así que el bug estaba en que `captured`
+     terminaba en `true` para prácticamente todo rayo. Causa: `traceSchwarzschild`/
+     `traceKerr` ganaron un nuevo camino de retorno temprano (el cruce del
+     disco) que fijaba `diskHit`/`diskRadius`/`diskPosition` pero nunca escribía
+     el parámetro `out bool captured` — un `out` no asignado en todos los
+     caminos de retorno es comportamiento no definido en GLSL, y aparentemente
+     el driver de este entorno lo leía como "verdadero" en la práctica. El fix
+     fue trivial (`captured = false;` explícito junto a `diskHit = true;` en
+     ambos tracers) pero encontrar la causa no lo fue — confirmado forzando
+     temporalmente la condición de cruce a `false` (sin tocar nada más), lo que
+     restauró el render correcto, aislando el bug al bloque de detección de
+     disco en sí y no a otra parte del archivo.
+   - Verificado en el navegador: el disco ahora se ve curvado hacia arriba
+     detrás de la sombra en ángulos oblicuos (el look clásico de M87/Interstellar
+     que motivó este PR), con blueshift visible del lado que se acerca; funciona
+     en Schwarzschild y Kerr; el switch "Mostrar disco de acreción" (del PR 6)
+     sigue ocultándolo por completo (pasa `null` en vez de bounds reales,
+     deshabilitando el chequeo de cruce vía el sentinel `innerRadius <= 0`); los
+     tres niveles de calidad del PR 7 renderizan sin errores con el disco activo.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

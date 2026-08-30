@@ -177,4 +177,67 @@ describe('traceKerrRay', () => {
     expect(progradeResult.captured).toBe(false)
     expect(retrogradeResult.captured).toBe(true)
   })
+
+  describe('disk crossing', () => {
+    const horizonRadius = mass + Math.sqrt(mass * mass - 0.5 * 0.5)
+    // Off-axis, off-equatorial camera aimed (in flat space) at a point
+    // (0,0,10) in the disk plane — weak field at r0≈45 with mass=1, so the
+    // real GR trajectory should cross the equatorial plane very close to
+    // that same radius, same setup as lensing.test.ts's equivalent check.
+    const cameraPos = [0, 20, 40] as const
+    const target = [0, 0, 10] as const
+    const rayDir = (() => {
+      const diff = [target[0] - cameraPos[0], target[1] - cameraPos[1], target[2] - cameraPos[2]] as const
+      const len = Math.hypot(diff[0], diff[1], diff[2])
+      return [diff[0] / len, diff[1] / len, diff[2] / len] as const
+    })()
+
+    it('reports a diskHit at the expected radius when the disk bounds contain the crossing (spin=0)', () => {
+      const result = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 2000,
+        disk: { innerRadius: 6, outerRadius: 60 },
+      })
+
+      expect(result.diskHit).toBeDefined()
+      expect(result.diskHit!.radius).toBeCloseTo(10, 0)
+      expect(result.diskHit!.position[1]).toBeCloseTo(0, 2)
+    })
+
+    it('falls through to a normal escape when the crossing radius is outside the disk bounds', () => {
+      const result = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 2000,
+        disk: { innerRadius: 15, outerRadius: 60 },
+      })
+
+      expect(result.diskHit).toBeUndefined()
+      expect(result.captured).toBe(false)
+    })
+
+    it('reports no diskHit when disk options are omitted', () => {
+      const result = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 2000,
+      })
+
+      expect(result.diskHit).toBeUndefined()
+    })
+
+    it('still detects the crossing with spin (frame dragging shifts φ, not the crossing radius/plane)', () => {
+      const spinHorizon = mass + Math.sqrt(mass * mass - 0.9 * 0.9)
+      const result = traceKerrRay({ mass, spin: 0.9, horizonRadius: spinHorizon }, cameraPos, rayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 2000,
+        disk: { innerRadius: 6, outerRadius: 60 },
+      })
+
+      expect(result.diskHit).toBeDefined()
+      expect(result.diskHit!.position[1]).toBeCloseTo(0, 2)
+    })
+  })
 })

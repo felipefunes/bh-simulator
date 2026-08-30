@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { traceSchwarzschildRay } from './lensing'
+import { dot, length, normalize, sub, type Vec3 } from './vec3'
 
 const mass = 1
 const horizonRadius = 2 * mass
@@ -97,5 +98,58 @@ describe('traceSchwarzschildRay', () => {
     const result = traceSchwarzschildRay({ mass, horizonRadius }, 10, 1, 0)
     expect(result.captured).toBe(false)
     expect(result.direction).toEqual({ e1: 1, e2: 0 })
+  })
+
+  describe('disk crossing', () => {
+    // The ray's orbital plane is generally tilted relative to the disk's
+    // (world-space y=0) plane — this builds the same world-space e1/e2 basis
+    // traceSchwarzschildRay's real callers (kerrLensing's a=0 case, and the
+    // GLSL mirror) construct from an actual 3D camera position and ray
+    // direction, so the disk-crossing check gets exercised the same way it
+    // is for real.
+    function setup(cameraPos: Vec3, rayDir3D: Vec3) {
+      const r0 = length(cameraPos)
+      const e1 = normalize(cameraPos)
+      const rdRadial = dot(rayDir3D, e1)
+      const tangential = sub(rayDir3D, [e1[0] * rdRadial, e1[1] * rdRadial, e1[2] * rdRadial])
+      const e2 = normalize(tangential)
+      const rdTangential = length(tangential)
+      return { r0, rdRadial, rdTangential, e1, e2 }
+    }
+
+    // Weak field at these distances (mass=1, r0≈45): aiming in flat space
+    // at a point (0,0,10) in the disk plane (radius 10 from the origin)
+    // lands the real GR trajectory very close to that same radius.
+    const { r0, rdRadial, rdTangential, e1, e2 } = setup([0, 20, 40], normalize(sub([0, 0, 10], [0, 20, 40])))
+
+    it('reports a diskHit at the expected radius when the disk bounds contain the crossing', () => {
+      const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
+        maxRadius: 2000,
+        disk: { e1, e2, innerRadius: 6, outerRadius: 60 },
+      })
+
+      expect(result.diskHit).toBeDefined()
+      expect(result.diskHit!.radius).toBeCloseTo(10, 0)
+      // The crossing position itself should actually lie in the disk plane.
+      expect(result.diskHit!.position[1]).toBeCloseTo(0, 2)
+    })
+
+    it('falls through to a normal escape when the crossing radius is outside the disk bounds', () => {
+      const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
+        maxRadius: 2000,
+        disk: { e1, e2, innerRadius: 15, outerRadius: 60 },
+      })
+
+      expect(result.diskHit).toBeUndefined()
+      expect(result.captured).toBe(false)
+    })
+
+    it('reports no diskHit when disk options are omitted', () => {
+      const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
+        maxRadius: 2000,
+      })
+
+      expect(result.diskHit).toBeUndefined()
+    })
   })
 })

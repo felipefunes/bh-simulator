@@ -115,9 +115,10 @@ export function Sidebar() {
       </div>
 
       <p className="sidebar__note">
-        La rotación del disco se muestra acelerada (×15) para que se note a esta
-        escala visual — la velocidad orbital real es Kepleriana correcta, pero
-        del orden de minutos por vuelta incluso en el borde interno.
+        El disco se calcula analíticamente en el mismo shader que la lente (perfil de
+        temperatura de Shakura–Sunyaev + beaming Doppler), no como partículas — por
+        eso se deforma y aparece duplicado arriba/abajo de la sombra, en vez de
+        superponerse sin curvarse con el resto de la imagen.
       </p>
 
       <p className="sidebar__note">

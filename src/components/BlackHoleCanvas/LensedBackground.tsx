@@ -118,12 +118,91 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uSchwDPhi;
   uniform int uKerrSteps;
   uniform float uKerrDTau;
+  // Disk bounds (roadmap item 8) — the ray tracers below check for a
+  // crossing of the equatorial plane within these radii and, if found,
+  // terminate early with the disk's analytic color instead of the
+  // background. innerRadius <= 0.0 (the showDisk-off sentinel from
+  // BlackHoleCanvas) disables the check entirely, since a real disk always
+  // has 0 < innerRadius < outerRadius.
+  uniform float uDiskInnerRadius;
+  uniform float uDiskOuterRadius;
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
   const int MAX_STEPS_KERR_CAP = 4000;
   const float PI = 3.14159265359;
   const vec3 SPIN_AXIS = vec3(0.0, 1.0, 0.0);
+  const float PEAK_TEMPERATURE_KELVIN = 14000.0;
+
+  // Mirrors src/physics/accretionDisk.ts exactly (Shakura & Sunyaev 1973
+  // profile) — see that module for the derivation and vitest coverage.
+  float diskTemperatureGLSL(float innerRadius, float r) {
+    if (r <= innerRadius) return 0.0;
+    float peakRadius = innerRadius * (49.0 / 36.0);
+    float shapeR = pow(r, -3.0) * (1.0 - sqrt(innerRadius / r));
+    float shapePeak = pow(peakRadius, -3.0) * (1.0 - sqrt(innerRadius / peakRadius));
+    return PEAK_TEMPERATURE_KELVIN * pow(max(0.0, shapeR) / shapePeak, 0.25);
+  }
+
+  // Mirrors src/physics/accretionDisk.ts's orbitalSpeed/combinedRedshiftFactor
+  // (mass-only Schwarzschild approximation — extending to Kerr/Kerr-Newman
+  // frame dragging is future work, same caveat that module's doc comments
+  // already carry).
+  float orbitalSpeedGLSL(float mass, float r) {
+    return sqrt(mass / max(1e-6, r - 2.0 * mass));
+  }
+
+  float dopplerFactorGLSL(float mass, float r, float betaLineOfSight) {
+    float beta = orbitalSpeedGLSL(mass, r);
+    float gamma = 1.0 / sqrt(max(1e-9, 1.0 - beta * beta));
+    float gravitational = sqrt(max(1e-9, 1.0 - 2.0 * mass / r));
+    float onePlusZ = (gamma * (1.0 - betaLineOfSight)) / gravitational;
+    return 1.0 / onePlusZ;
+  }
+
+  vec3 blackbodyColorGLSL(float temperatureKelvin) {
+    float t = clamp(temperatureKelvin, 1000.0, 40000.0) / 100.0;
+
+    float r = t <= 66.0 ? 255.0 : 329.698727446 * pow(t - 60.0, -0.1332047592);
+    float g = t <= 66.0
+      ? 99.4708025861 * log(t) - 161.1195681661
+      : 288.1221695283 * pow(t - 60.0, -0.0755148492);
+    float b;
+    if (t >= 66.0) {
+      b = 255.0;
+    } else if (t <= 19.0) {
+      b = 0.0;
+    } else {
+      b = 138.5177312231 * log(t - 10.0) - 305.0447927307;
+    }
+
+    return clamp(vec3(r, g, b) / 255.0, 0.0, 1.0);
+  }
+
+  // Analytic disk color at a crossing point — replaces the old opaque
+  // particle geometry (roadmap item 8) so the disk is properly lensed
+  // (deformed, and duplicated above/below the shadow) rather than drawn as
+  // flat, unlensed geometry on top of the raytraced background. The
+  // line-of-sight direction uses the straight line from the crossing point
+  // to the camera as a proxy for the local photon direction, the same
+  // approximation the old particle shader used (dot(velocityDir,
+  // towardCamera)) — a fully rigorous treatment would project the photon's
+  // actual local tetrad-frame direction instead, which is future work, same
+  // as the mass-only (Schwarzschild) temperature/speed formulas above.
+  vec3 diskColor(vec3 position, float radius) {
+    vec3 radial = position / radius;
+    // Unit tangential (orbital-motion) direction, derived from d(position)/dφ
+    // in traceKerr's own (xRef, yRef) convention — see the comment at this
+    // function's call sites for the derivation. Using this rather than the
+    // old particle shader's convention keeps the disk co-rotating with
+    // prograde photons (L > 0), the standard physical configuration.
+    vec3 tangential = vec3(radial.z, 0.0, -radial.x);
+    vec3 towardCamera = normalize(uCameraPos - position);
+    float betaLineOfSight = orbitalSpeedGLSL(uMass, radius) * dot(tangential, towardCamera);
+    float doppler = dopplerFactorGLSL(uMass, radius, betaLineOfSight);
+    float baseTemperature = diskTemperatureGLSL(uDiskInnerRadius, radius);
+    return blackbodyColorGLSL(baseTemperature * doppler) * pow(doppler, 3.0);
+  }
 
   vec2 equirectUv(vec3 dir) {
     float phi = atan(dir.z, dir.x);
@@ -131,7 +210,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
   }
 
-  vec3 traceSchwarzschild(vec3 ro, vec3 rd, out bool captured) {
+  vec3 traceSchwarzschild(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
+    diskHit = false;
     float r0 = length(ro);
     vec3 e1 = ro / r0;
     vec3 tangential = rd - dot(rd, e1) * e1;
@@ -154,6 +234,9 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     for (int i = 0; i < MAX_STEPS_SCHW_CAP; i++) {
       if (i >= uSchwSteps) break;
+      float prevU = u;
+      float prevPhi = phi;
+
       float k1u = v;
       float k1v = -u + 3.0 * uMass * u * u;
       float u2 = u + (uSchwDPhi * 0.5) * k1u;
@@ -173,6 +256,30 @@ const FRAGMENT_SHADER = /* glsl */ `
       v += (uSchwDPhi / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
       phi += uSchwDPhi;
 
+      // Disk plane (world-space y=0) crossing — see traceSchwarzschildRay's
+      // doc comment in physics/lensing.ts for the full derivation. e1/e2
+      // are this ray's own world-space orbital-plane basis, so their y
+      // components are all that's needed to reconstruct the position's
+      // y-coordinate at each step without a full 3D reconstruction.
+      if (uDiskInnerRadius > 0.0) {
+        float prevR = 1.0 / prevU;
+        float newR = 1.0 / u;
+        float yPrev = prevR * (cos(prevPhi) * e1.y + sin(prevPhi) * e2.y);
+        float yNew = newR * (cos(phi) * e1.y + sin(phi) * e2.y);
+        if (yPrev * yNew < 0.0) {
+          float fraction = yPrev / (yPrev - yNew);
+          float hitR = prevR + fraction * (newR - prevR);
+          if (hitR >= uDiskInnerRadius && hitR <= uDiskOuterRadius) {
+            float hitPhi = prevPhi + fraction * (phi - prevPhi);
+            diskHit = true;
+            diskRadius = hitR;
+            diskPosition = hitR * cos(hitPhi) * e1 + hitR * sin(hitPhi) * e2;
+            captured = false;
+            return rd;
+          }
+        }
+      }
+
       if (u > uHorizon) { captured = true; return rd; }
       if (u < uMin) { escaped = true; break; }
     }
@@ -180,10 +287,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     if (!escaped) { captured = true; return rd; }
 
     captured = false;
-    float cosPhi = cos(phi);
-    float sinPhi = sin(phi);
-    float e1Comp = -(v / u) * cosPhi - sinPhi;
-    float e2Comp = -(v / u) * sinPhi + cosPhi;
+    float cosPhiFinal = cos(phi);
+    float sinPhiFinal = sin(phi);
+    float e1Comp = -(v / u) * cosPhiFinal - sinPhiFinal;
+    float e2Comp = -(v / u) * sinPhiFinal + cosPhiFinal;
     return normalize(e1Comp * e1 + e2Comp * e2);
   }
 
@@ -214,7 +321,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   // straight from the already-smooth, already-accumulated phi sidesteps
   // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
   // handles phi being outside [-π, π] for free.
-  vec2 traceKerr(vec3 ro, vec3 rd, out bool captured) {
+  vec2 traceKerr(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
+    diskHit = false;
     float M = uMass;
     float a = uSpin;
     float e2 = uCharge * uCharge;
@@ -271,6 +379,10 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     for (int i = 0; i < MAX_STEPS_KERR_CAP; i++) {
       if (i >= uKerrSteps) break;
+      float prevR = r;
+      float prevTheta = theta;
+      float prevPhi = phi;
+
       // derivatives(r, theta, wr, wth) -> (dr, dth, dphi, dwr, dwth), inlined
       // four times for the RK4 stages.
       float k1r = wr;
@@ -331,6 +443,23 @@ const FRAGMENT_SHADER = /* glsl */ `
       wr += (uKerrDTau / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
       wth += (uKerrDTau / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
 
+      // Disk plane (θ=π/2) crossing — see traceKerrRay's doc comment in
+      // physics/kerrLensing.ts for the full derivation. Checked before the
+      // POLE_GUARD block below, which only ever adjusts theta near the
+      // poles (far from π/2) and is irrelevant either way.
+      if (uDiskInnerRadius > 0.0 && (prevTheta - PI * 0.5) * (theta - PI * 0.5) < 0.0) {
+        float fraction = (PI * 0.5 - prevTheta) / (theta - prevTheta);
+        float hitR = prevR + fraction * (r - prevR);
+        if (hitR >= uDiskInnerRadius && hitR <= uDiskOuterRadius) {
+          float hitPhi = prevPhi + fraction * (phi - prevPhi);
+          diskHit = true;
+          diskRadius = hitR;
+          diskPosition = hitR * cos(hitPhi) * xRef + hitR * sin(hitPhi) * yRef;
+          captured = false;
+          return vec2(0.0);
+        }
+      }
+
       // A real photon orbit with L≠0 turns around before ever reaching the
       // pole (Θ(θ) hits zero first) — but a single RK4 step can overshoot
       // past that turning point numerically near the singularity. Reflect
@@ -363,7 +492,11 @@ const FRAGMENT_SHADER = /* glsl */ `
   // e > 0 always goes through kerrColor below, everywhere on the sky,
   // including near the poles; see that function's comment for why).
   vec3 schwarzschildColor(vec3 ro, vec3 rd, out bool captured) {
-    vec3 finalDir = traceSchwarzschild(ro, rd, captured);
+    bool diskHit;
+    vec3 diskPosition;
+    float diskRadius;
+    vec3 finalDir = traceSchwarzschild(ro, rd, captured, diskHit, diskPosition, diskRadius);
+    if (diskHit) return diskColor(diskPosition, diskRadius);
     if (captured) return vec3(0.0);
     return texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
   }
@@ -396,7 +529,11 @@ const FRAGMENT_SHADER = /* glsl */ `
   // problem that a previous fix had already solved, and only introducing a
   // new one.
   vec3 kerrColor(vec3 ro, vec3 rd, out bool captured) {
-    vec2 uv = traceKerr(ro, rd, captured);
+    bool diskHit;
+    vec3 diskPosition;
+    float diskRadius;
+    vec2 uv = traceKerr(ro, rd, captured, diskHit, diskPosition, diskRadius);
+    if (diskHit) return diskColor(diskPosition, diskRadius);
     if (captured) return vec3(0.0);
 
     // An equirectangular texture is mathematically degenerate exactly at
@@ -433,10 +570,13 @@ export function LensedBackground({
   params,
   horizonRadius,
   quality,
+  disk,
 }: {
   params: BlackHoleParams
   horizonRadius: number
   quality: QualityLevel
+  /** Disk radii in the same units as mass/horizonRadius, or null to disable the disk entirely (the showDisk sidebar toggle). */
+  disk: { innerRadius: number; outerRadius: number } | null
 }) {
   const { camera } = useThree()
   const materialRef = useRef<THREE.ShaderMaterial>(null)
@@ -460,8 +600,10 @@ export function LensedBackground({
       uSchwDPhi: { value: INTEGRATOR_QUALITY[quality].schwDPhi },
       uKerrSteps: { value: INTEGRATOR_QUALITY[quality].kerrSteps },
       uKerrDTau: { value: INTEGRATOR_QUALITY[quality].kerrDTau },
+      uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
+      uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
     }),
-    [texture, params.mass, params.spin, params.charge, horizonRadius, quality],
+    [texture, params.mass, params.spin, params.charge, horizonRadius, quality, disk],
   )
 
   useFrame(() => {
@@ -478,6 +620,8 @@ export function LensedBackground({
     material.uniforms.uSchwDPhi.value = preset.schwDPhi
     material.uniforms.uKerrSteps.value = preset.kerrSteps
     material.uniforms.uKerrDTau.value = preset.kerrDTau
+    material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
+    material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
   })
 
   return (

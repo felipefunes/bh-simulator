@@ -8,7 +8,7 @@ interface BlackHoleStore {
   spinRatio: number
   /** Q* = Q / M, in [0, 1]. */
   chargeRatio: number
-  /** Purely a visual QA toggle — hides AccretionDisk so lensing artifacts near the poles/shadow aren't obscured by disk geometry. */
+  /** Disables the lensed accretion disk (originally a visual-QA toggle, from before the disk was rendered by the lensing shader, so lensing artifacts near the poles/shadow weren't obscured by disk geometry — still useful for that). */
   showDisk: boolean
   /** Integrator steps + pixel ratio trade-off — see physics/renderQuality.ts. */
   quality: QualityLevel

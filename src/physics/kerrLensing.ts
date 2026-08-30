@@ -1,32 +1,21 @@
-type Vec3 = readonly [number, number, number]
+import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec3'
 
-function dot(a: Vec3, b: Vec3): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-function cross(a: Vec3, b: Vec3): Vec3 {
-  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-function sub(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-function scale(a: Vec3, s: number): Vec3 {
-  return [a[0] * s, a[1] * s, a[2] * s]
-}
-function add(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-function length(a: Vec3): number {
-  return Math.sqrt(dot(a, a))
-}
-function normalize(a: Vec3): Vec3 {
-  const l = length(a)
-  return [a[0] / l, a[1] / l, a[2] / l]
+export interface DiskBounds {
+  innerRadius: number
+  outerRadius: number
 }
 
 export interface KerrRayOutcome {
   captured: boolean
   /** World-space unit direction the ray escapes toward. Set only when captured is false. */
   direction?: Vec3
+  /**
+   * Set when the ray crosses the equatorial (disk) plane within
+   * [innerRadius, outerRadius] before being captured or escaping — the disk
+   * is opaque, so this takes priority over whatever direction/captured
+   * would otherwise apply (see traceKerrRay's disk option).
+   */
+  diskHit?: { radius: number; position: Vec3 }
 }
 
 export interface KerrTraceOptions {
@@ -34,6 +23,8 @@ export interface KerrTraceOptions {
   /** Step size in Mino time (dτ = dλ/Σ) — see the derivation note below. */
   dTau?: number
   maxRadius?: number
+  /** When set, the ray is checked for crossing the equatorial plane within these radii — see traceKerrRay's doc comment. */
+  disk?: DiskBounds
 }
 
 /**
@@ -93,6 +84,14 @@ export interface KerrTraceOptions {
  * (prograde and retrograde) matching photonSphereRadius from physics/orbits;
  * and the qualitative frame-dragging asymmetry (same |b|, opposite outcome
  * for prograde vs. retrograde at high spin). See kerrLensing.test.ts.
+ *
+ * When options.disk is set, the trace also terminates early — same as a
+ * capture — the first time it crosses the equatorial plane (θ=π/2, where
+ * the disk lives) within [innerRadius, outerRadius], returning the crossing
+ * radius and world position instead of an escape direction. This is what
+ * lets the disk appear properly lensed (deformed, and duplicated above/below
+ * the shadow) rather than as flat, unlensed particle geometry — see
+ * LensedBackground.tsx's GLSL mirror and roadmap item 8.
  */
 export function traceKerrRay(
   {
@@ -104,7 +103,7 @@ export function traceKerrRay(
   cameraPos: Vec3,
   rayDir: Vec3,
   spinAxis: Vec3,
-  { maxSteps = 20000, dTau = 0.0005, maxRadius = 100 * mass }: KerrTraceOptions = {},
+  { maxSteps = 20000, dTau = 0.0005, maxRadius = 100 * mass, disk }: KerrTraceOptions = {},
 ): KerrRayOutcome {
   const M = mass
   const a = spin
@@ -203,7 +202,13 @@ export function traceKerrRay(
   const thetaNearPole = Q + cosGuard * cosGuard * (a * a - (L * L) / (sinGuard * sinGuard))
   const isPoleCrossing = thetaNearPole > 0
 
+  const HALF_PI = Math.PI / 2
+
   for (let step = 0; step < maxSteps; step++) {
+    const prevR = r
+    const prevTheta = theta
+    const prevPhi = phi
+
     const k1 = derivatives(r, theta, wr, wth)
     const k2 = derivatives(r + (dTau / 2) * k1[0], theta + (dTau / 2) * k1[1], wr + (dTau / 2) * k1[3], wth + (dTau / 2) * k1[4])
     const k3 = derivatives(r + (dTau / 2) * k2[0], theta + (dTau / 2) * k2[1], wr + (dTau / 2) * k2[3], wth + (dTau / 2) * k2[4])
@@ -214,6 +219,23 @@ export function traceKerrRay(
     phi += (dTau / 6) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
     wr += (dTau / 6) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3])
     wth += (dTau / 6) * (k1[4] + 2 * k2[4] + 2 * k3[4] + k4[4])
+
+    // The disk is opaque and lies exactly in the equatorial plane (θ=π/2),
+    // so a crossing here — interpolated linearly between this step and the
+    // last, which is accurate enough at these step sizes since the disk is
+    // thin compared to the radial distance covered per step — terminates
+    // the trace immediately, the same way capture does. Must be checked
+    // before the POLE_GUARD block below, which only ever adjusts theta near
+    // the poles (far from π/2) and would otherwise be irrelevant either way.
+    if (disk && (prevTheta - HALF_PI) * (theta - HALF_PI) < 0) {
+      const fraction = (HALF_PI - prevTheta) / (theta - prevTheta)
+      const hitRadius = prevR + fraction * (r - prevR)
+      if (hitRadius >= disk.innerRadius && hitRadius <= disk.outerRadius) {
+        const hitPhi = prevPhi + fraction * (phi - prevPhi)
+        const position = add(scale(xRef, hitRadius * Math.cos(hitPhi)), scale(yRef, hitRadius * Math.sin(hitPhi)))
+        return { captured: false, diskHit: { radius: hitRadius, position } }
+      }
+    }
 
     if (theta < POLE_GUARD) {
       theta = 2 * POLE_GUARD - theta
