@@ -283,6 +283,44 @@ clasificación del caso) de forma aislada del render.
        ecuatorial, aquí visto sobre el eje). En el uso normal el disco de
        acreción tapa esa zona por completo. No se investigó más allá de este
        punto.
+     - Aun así, en la siguiente review el usuario reportó que las líneas
+       seguían ahí ("realmente no sé qué podemos hacer con esas líneas") y,
+       además, unas líneas concéntricas alrededor de la sombra con forma de
+       "escalera" (bloques dentados, no una curva lisa) — junto con el
+       navegador visiblemente forzado en recursos. Estas resultaron ser DOS
+       causas nuevas y separadas, ninguna relacionada con la física del
+       integrador:
+       - El `shaderMaterial` de `LensedBackground` nunca declaraba
+         `precision`, dejando que three.js eligiera automáticamente (según
+         soporte detectado del driver/GPU) entre `highp`/`mediump`/`lowp`.
+         En `mediump` (≈10 bits de mantisa), acumular ~2200 pasos de RK4
+         por píxel pierde precisión progresivamente, y esa pérdida se
+         manifiesta como bandas/escalones discretos — exactamente las
+         líneas concéntricas dentadas reportadas. Fix: `precision="highp"`
+         explícito en el `shaderMaterial`. No se descartó por rendimiento;
+         de hecho, forzar precisión explícita evita que el driver GPU
+         re-evalúe/cambie de precisión en tiempo de ejecución, lo cual
+         también puede aliviar el uso de recursos reportado.
+       - Aun con `highp`, quedaba un anillo de arcos finos y lisos (sin
+         dentado) exactamente donde está la mancha de galaxia de fondo —
+         estos SÍ son reales, pero de otra causa: la lente gravitacional
+         amplifica el ángulo sólido sin límite cerca de la esfera de
+         fotones (en el límite, un anillo entero del cielo colapsa a un
+         punto), así que los escalones de 8 bits del gradiente radial de la
+         mancha (`createRadialGradient`, sobre un canvas de 2048×1024)
+         eventualmente se vuelven visibles al ser magnificados lo
+         suficiente — eran invisibles a resolución normal, pero la lente
+         los estira hasta hacerlos notorios. Mitigado duplicando la
+         resolución de la textura (4096×2048 en `LensedBackground.tsx`),
+         lo que empuja el radio en que esto se vuelve visible hacia afuera,
+         aunque no elimina el límite de fondo (una textura rasterizada de
+         resolución finita bajo magnificación no acotada) — ese trade-off
+         de fidelidad vs. rendimiento es justamente lo que los controles de
+         calidad del roadmap (ítem 7) deberían exponer como ajustable.
+       - Verificado en el navegador reproduciendo el escenario exacto de la
+         review (masa=0.75, spin=1.00, disco oculto vía el nuevo switch):
+         sin líneas dentadas, sin arcos visibles, sin línea punteada en el
+         eje en este encuadre.
    - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
      del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
      Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se

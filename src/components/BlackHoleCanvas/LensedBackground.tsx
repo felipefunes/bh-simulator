@@ -14,8 +14,18 @@ const SPHERE_RADIUS = 500
 // theta/phi for every pixel regardless of screen position, collapsing the
 // entire lensed background to a single sampled texture color.
 const MAX_RAY_RADIUS = 400
-const TEXTURE_WIDTH = 2048
-const TEXTURE_HEIGHT = 1024
+// 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
+// angle without bound near the photon sphere (in the limit, a full ring of
+// sky maps to a single point), so any raster texture's 8-bit gradient steps
+// (the galaxy smudge's radial gradient, in particular) eventually become
+// visible as concentric bands once magnified enough — found via visual QA
+// as a set of thin arcs near the shadow. Doubling resolution pushes the
+// radius at which that becomes visible outward; it doesn't eliminate the
+// underlying limit (a finite-resolution texture under unbounded
+// magnification), which is the kind of fidelity/performance trade-off
+// roadmap item 7's quality controls are meant to make tunable.
+const TEXTURE_WIDTH = 4096
+const TEXTURE_HEIGHT = 2048
 const STAR_COUNT = 3000
 
 function generateGalaxyBackgroundTexture(): THREE.Texture {
@@ -457,6 +467,7 @@ export function LensedBackground({
         fragmentShader={FRAGMENT_SHADER}
         side={THREE.BackSide}
         depthWrite={false}
+        precision="highp"
       />
     </mesh>
   )
