@@ -240,13 +240,49 @@ clasificación del caso) de forma aislada del render.
        del polo) que un fix anterior ya había resuelto, y solo introducía uno
        nuevo. Verificado en el navegador reproduciendo exactamente el
        escenario reportado (masa=0.75, spin=1.00, cámara en ángulo
-       pronunciado): sin conos, sin cuña, sin línea brillante. Queda un
-       rastro extremadamente tenue (una fila de puntos casi imperceptibles
-       subiendo por el eje, visible solo con zoom fuerte) que es consistente
-       con imágenes fantasma de orden superior genuinas — el análogo, sobre
-       el eje de spin, de los anillos de Einstein de orden superior en el
-       plano ecuatorial — más que con un bug; no se investigó más a fondo
-       dado lo sutil que es comparado con los artefactos anteriores.
+       pronunciado): sin conos, sin cuña, sin línea brillante. Quedó un
+       rastro tenue (una línea punteada subiendo por el eje) que en su
+       momento se atribuyó tentativamente a imágenes fantasma de orden
+       superior genuinas sin investigar más — pero una review posterior
+       mostró que seguía siendo bastante visible ("seguimos teniendo los
+       jets"), así que se investigó a fondo en vez de darlo por aceptable.
+     - Causa real de ese rastro punteado (encontrada agregando un switch en
+       el sidebar para ocultar el disco de acreción durante el testing,
+       pedido explícito del usuario — ver `showDisk` en el store — porque el
+       disco tapaba justo la zona del eje donde aparecía el artefacto):
+       primero se probó si era un problema de precisión numérica (subir
+       `MAX_STEPS_KERR`/bajar `D_TAU` varias veces), y el patrón no cambió en
+       absoluto — descartando error de integración como causa. La causa real
+       era conceptual: el bloque `POLE_GUARD` trata *cualquier* cruce cercano
+       al polo como un rebote (refleja θ, invierte w_θ), asumiendo que
+       siempre hay un punto de retorno real ahí (Θ(θ)=0) que el paso de RK4
+       simplemente overshooteó. Eso es cierto para un rayo con L≠0 — pero un
+       rayo con L≈0 (el plano vertical que contiene cámara y eje de spin) NO
+       tiene punto de retorno en absoluto: Θ(θ) = Q + a²cos²θ es ≥0 para
+       todo θ, así que ese rayo genuinamente **pasa por encima del polo**
+       hacia el otro lado del cielo (φ → φ+π), igual que caminar en línea
+       recta sobre el polo norte de un globo terráqueo te deja 180° del otro
+       lado en longitud. Tratar ese cruce como un rebote atrapa el rayo
+       rebotando artificialmente entre ambos polos varias veces antes de
+       escapar, y cada rebote espurio muestrea casi la misma franja de
+       cielo — de ahí la línea punteada (cada punto es una repetición de la
+       misma imagen). Fix: antes de aplicar el rebote, se evalúa Θ(θ) en la
+       latitud de guarda (`thetaNearPole`, calculado una sola vez por rayo ya
+       que L/Q/a no cambian) — si da claramente positivo (sin punto de
+       retorno real cerca), es un cruce genuino y se suma π a φ además de
+       reflejar θ; si da ~0 (retorno real), se deja el rebote sin más como
+       antes. Aplicado en `kerrLensing.ts` (con el test de vitest ya
+       existente verificando finitud cerca del polo) y su espejo en
+       `LensedBackground.tsx`.
+     - Con el fix, la línea punteada dejó de extenderse por todo el cuadro
+       (arriba y abajo de la sombra, incluso lejos del agujero, algo que
+       nunca tuvo sentido físico para rayos casi sin deflectar) y quedó
+       confinada a un tramo corto justo junto a la sombra — consistente
+       ahora sí con ecos genuinos del anillo de fotones (el mismo fenómeno
+       real que produce anillos de Einstein de orden superior en el plano
+       ecuatorial, aquí visto sobre el eje). En el uso normal el disco de
+       acreción tapa esa zona por completo. No se investigó más allá de este
+       punto.
    - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
      del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
      Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se

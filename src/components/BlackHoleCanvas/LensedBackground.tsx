@@ -234,6 +234,20 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     bool escaped = false;
 
+    // Whether this ray has a real Θ(θ) turning point near the pole (a true
+    // bounce) or genuinely has none (L≈0, Θ = Q + a²cos²θ stays ≥ 0 all the
+    // way to the axis, so the ray passes over the pole into the opposite
+    // half of the sky, φ → φ + π) — see the matching comment in
+    // kerrLensing.ts's traceKerrRay for the full derivation and the visual
+    // artifact (a faint periodic chain of duplicate star images up the
+    // spin axis) this distinction fixes. Ray-invariant, so computed once
+    // outside the step loop.
+    const float POLE_GUARD = 0.02;
+    float sinGuard = sin(POLE_GUARD);
+    float cosGuard = cos(POLE_GUARD);
+    float thetaNearPole = Q + cosGuard * cosGuard * (a * a - L * L / (sinGuard * sinGuard));
+    bool isPoleCrossing = thetaNearPole > 0.0;
+
     for (int i = 0; i < MAX_STEPS_KERR; i++) {
       // derivatives(r, theta, wr, wth) -> (dr, dth, dphi, dwr, dwth), inlined
       // four times for the RK4 stages.
@@ -300,10 +314,17 @@ const FRAGMENT_SHADER = /* glsl */ `
       // past that turning point numerically near the singularity. Reflect
       // theta/wth like a wall there instead of letting the ray punch
       // through, which otherwise shows up as a bright seam along the spin
-      // axis.
-      const float POLE_GUARD = 0.02;
-      if (theta < POLE_GUARD) { theta = 2.0 * POLE_GUARD - theta; wth = -wth; }
-      if (theta > PI - POLE_GUARD) { theta = 2.0 * (PI - POLE_GUARD) - theta; wth = -wth; }
+      // axis. When there's no real turning point nearby (isPoleCrossing,
+      // computed once above), the ray is genuinely passing over the pole
+      // into the opposite half of the sky, so φ picks up an extra π.
+      if (theta < POLE_GUARD) {
+        theta = 2.0 * POLE_GUARD - theta; wth = -wth;
+        if (isPoleCrossing) phi += PI;
+      }
+      if (theta > PI - POLE_GUARD) {
+        theta = 2.0 * (PI - POLE_GUARD) - theta; wth = -wth;
+        if (isPoleCrossing) phi += PI;
+      }
 
       if (r < uHorizonRadius || !(r == r)) { captured = true; return vec2(0.0); }
       if (r > uMaxRadius) { escaped = true; break; }

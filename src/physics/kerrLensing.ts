@@ -179,7 +179,29 @@ export function traceKerrRay(
   // (Θ(θ) hits zero first); a single RK4 step can overshoot past that
   // turning point numerically right at the singularity. Reflect theta/wth
   // like a wall there instead of letting the ray punch through.
+  //
+  // But a ray with L≈0 (near the vertical plane through the camera and the
+  // spin axis) has no turning point at all — Θ(θ) = Q + a²cos²θ stays ≥ 0
+  // for every θ, so the ray genuinely passes over the pole and continues
+  // into the opposite half of the sky (φ → φ + π), the same way walking
+  // over the north pole of a globe in a straight line puts you 180° around
+  // in longitude on the way back down. Treating that crossing as a bounce
+  // (this block's original behavior) traps the ray oscillating between the
+  // two poles instead of letting it continue outward, producing a periodic
+  // chain of duplicate star images climbing the spin axis — found via
+  // visual QA as a faint dashed/"beaded" line, persisting even at much
+  // higher integration precision (ruling out step-size error as the cause,
+  // and pointing at this wrong reflection rule instead). Distinguish the
+  // two cases by evaluating Θ right at the guard latitude: if it's still
+  // clearly positive there, there's no turning point nearby and this is a
+  // genuine pole crossing, so add the π shift; if it's ~0 (or the guard
+  // itself is closer to the pole than the true turning point), it's a real
+  // bounce and φ is left alone.
   const POLE_GUARD = 0.02
+  const sinGuard = Math.sin(POLE_GUARD)
+  const cosGuard = Math.cos(POLE_GUARD)
+  const thetaNearPole = Q + cosGuard * cosGuard * (a * a - (L * L) / (sinGuard * sinGuard))
+  const isPoleCrossing = thetaNearPole > 0
 
   for (let step = 0; step < maxSteps; step++) {
     const k1 = derivatives(r, theta, wr, wth)
@@ -196,10 +218,12 @@ export function traceKerrRay(
     if (theta < POLE_GUARD) {
       theta = 2 * POLE_GUARD - theta
       wth = -wth
+      if (isPoleCrossing) phi += Math.PI
     }
     if (theta > Math.PI - POLE_GUARD) {
       theta = 2 * (Math.PI - POLE_GUARD) - theta
       wth = -wth
+      if (isPoleCrossing) phi += Math.PI
     }
 
     if (!Number.isFinite(r) || !Number.isFinite(theta)) break

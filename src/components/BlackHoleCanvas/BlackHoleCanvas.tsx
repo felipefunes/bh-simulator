@@ -2,7 +2,7 @@ import { OrbitControls } from '@react-three/drei'
 import { Canvas } from '@react-three/fiber'
 import { horizonRadii } from '../../physics/metric'
 import { iscoRadius } from '../../physics/orbits'
-import { useBlackHoleParams } from '../../store/blackHoleStore'
+import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
 import { AccretionDisk } from './AccretionDisk'
 import { LensedBackground } from './LensedBackground'
 
@@ -13,6 +13,7 @@ const DISK_OUTER_TO_INNER_RATIO = 10
 
 export function BlackHoleCanvas() {
   const params = useBlackHoleParams()
+  const showDisk = useBlackHoleStore((state) => state.showDisk)
   const horizons = horizonRadii(params)
 
   // iscoRadius is only a closed form for Schwarzschild/Kerr (charge = 0, see
@@ -30,12 +31,14 @@ export function BlackHoleCanvas() {
     <Canvas camera={{ position: [0, 51, 111], fov: 50 }}>
       <LensedBackground params={params} horizonRadius={horizons?.outer ?? 1e-6} />
       <ambientLight intensity={0.15} />
-      <AccretionDisk
-        key={`${innerRadius.toFixed(3)}-${outerRadius.toFixed(3)}`}
-        mass={params.mass}
-        innerRadius={innerRadius}
-        outerRadius={outerRadius}
-      />
+      {showDisk && (
+        <AccretionDisk
+          key={`${innerRadius.toFixed(3)}-${outerRadius.toFixed(3)}`}
+          mass={params.mass}
+          innerRadius={innerRadius}
+          outerRadius={outerRadius}
+        />
+      )}
       <OrbitControls enableDamping minDistance={3} maxDistance={180} />
     </Canvas>
   )
