@@ -215,6 +215,38 @@ clasificación del caso) de forma aislada del render.
        el fallback — así se confina al entorno real de la sombra, donde la
        aproximación tiene sentido, en vez de a cualquier rayo en ese plano
        sin importar qué tan lejos pase.
+     - Ese fix (más acotado) trajo un tercer bug, reportado en review como
+       "conos con forma de reloj de arena" saliendo de los polos (además de
+       los "jets" que seguían viéndose): la región del fallback, ahora
+       confinada cerca del agujero, seguía siendo un cambio *duro* de un
+       tracer a otro — y el borde de ese cambio, donde antes había sido una
+       cuña del tamaño de toda la pantalla, ahora era un doble cono visible
+       alrededor de la sombra, con la misma causa raíz (Schwarzschild y Kerr
+       no coinciden píxel a píxel en qué parte del cielo debería verse).
+       Primer intento de fix: en vez de un salto duro, difuminar (mezclar
+       colores) entre ambos tracers en una banda alrededor del umbral de
+       cambio. Diagnosticado con más color-coding (esta vez comparando el
+       ángulo θ final de cada tracer directamente, no solo el color): en el
+       borde de esa banda ambos tracers predicen θ finales que difieren en
+       decenas de grados, no en ruido de punto flotante — ninguna cantidad de
+       difuminado de color puede ocultar un desacuerdo de esa magnitud, solo
+       lo vuelve menos abrupto visualmente.
+     - Fix definitivo: se eliminó el fallback por completo. Se verificó
+       (forzando temporalmente todo rayo con spin/carga a pasar solo por
+       `traceKerr`, sin ningún fallback) que el integrador completo, con el
+       sampleo directo de UV desde (θ,φ) y el reflejo `POLE_GUARD` ya
+       existentes, es números lo bastante estable cerca del eje por sí solo
+       — el fallback estaba resolviendo un problema (la inestabilidad cerca
+       del polo) que un fix anterior ya había resuelto, y solo introducía uno
+       nuevo. Verificado en el navegador reproduciendo exactamente el
+       escenario reportado (masa=0.75, spin=1.00, cámara en ángulo
+       pronunciado): sin conos, sin cuña, sin línea brillante. Queda un
+       rastro extremadamente tenue (una fila de puntos casi imperceptibles
+       subiendo por el eje, visible solo con zoom fuerte) que es consistente
+       con imágenes fantasma de orden superior genuinas — el análogo, sobre
+       el eje de spin, de los anillos de Einstein de orden superior en el
+       plano ecuatorial — más que con un bug; no se investigó más a fondo
+       dado lo sutil que es comparado con los artefactos anteriores.
    - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
      del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
      Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se

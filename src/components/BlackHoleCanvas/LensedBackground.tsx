@@ -315,59 +315,46 @@ const FRAGMENT_SHADER = /* glsl */ `
     return vec2(phi / (2.0 * PI) + 0.5, clamp(theta, 0.0, PI) / PI);
   }
 
-  void main() {
-    vec3 rd = normalize(vWorldPos - uCameraPos);
-    bool captured = false;
+  // Samples the background for a ray handled by the pure-mass Schwarzschild
+  // tracer — used only when there's no spin or charge at all (a > 0 or
+  // e > 0 always goes through kerrColor below, everywhere on the sky,
+  // including near the poles; see that function's comment for why).
+  vec3 schwarzschildColor(vec3 ro, vec3 rd, out bool captured) {
+    vec3 finalDir = traceSchwarzschild(ro, rd, captured);
+    if (captured) return vec3(0.0);
+    return texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
+  }
 
-    // Rays whose trajectory swings close to the spin axis push the (r,θ,φ)
-    // Kerr integrator into its numerically fragile pole region (visible,
-    // pre-fix, as a bright seam or a repeating chain of ghost images of
-    // whatever's behind it). Rather than patch that integration further,
-    // sidestep it: estimate the trajectory's closest approach to the pole
-    // — sin(θ_min) ≈ |L| / sqrt(L² + Q), from Θ(θ)'s small-angle expansion
-    // — and for rays that get very close, fall back to the pure-mass
-    // Schwarzschild tracer instead of the full Kerr one. This isn't just a
-    // convenient dodge: frame dragging is strongest in the equatorial plane
-    // and vanishes exactly on the spin axis, so ignoring spin is also the
-    // *most accurate* approximation available precisely in the regime where
-    // the full integrator is least reliable.
-    //
-    // sin(θ_min) alone isn't enough, though: it only measures *direction*
-    // (L vs Q), not whether the ray ever actually gets near the black hole.
-    // Every ray in the vertical plane through the camera and the spin axis
-    // has L = 0 exactly, regardless of how far above/below the hole it's
-    // aimed — without a distance check that entire plane (a wedge across
-    // the whole frame once projected) was routed to the Schwarzschild
-    // fallback, confirmed by color-coding which tracer handled each pixel:
-    // the "jet"-looking wedge was that fallback region sampling a different,
-    // coincidentally darker patch of sky than the true Kerr result next to
-    // it — not a captured/shadow effect at all. Requiring the impact
-    // parameter itself to be small (i.e. the ray is actually headed
-    // close to the hole) keeps the fallback confined to near the shadow,
-    // where the pole singularity is actually reachable.
-    vec3 impactVec = cross(uCameraPos, rd);
-    float LCheck = dot(impactVec, SPIN_AXIS);
-    float QCheck = max(0.0, dot(impactVec, impactVec) - LCheck * LCheck);
-    float sinThetaMinEstimate = abs(LCheck) / sqrt(LCheck * LCheck + QCheck + 1e-9);
-    float impactParameterSq = LCheck * LCheck + QCheck;
-    float closeRadius = 20.0 * uMass;
-    bool nearPolarTrajectory = sinThetaMinEstimate < 0.3 && impactParameterSq < closeRadius * closeRadius;
-
-    if ((uSpin < 1e-4 && uCharge < 1e-4) || nearPolarTrajectory) {
-      vec3 finalDir = traceSchwarzschild(uCameraPos, rd, captured);
-      if (captured) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        return;
-      }
-      gl_FragColor = texture2D(uBackgroundTexture, equirectUv(finalDir));
-      return;
-    }
-
-    vec2 uv = traceKerr(uCameraPos, rd, captured);
-    if (captured) {
-      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-      return;
-    }
+  // Samples the background for a ray handled by the full Kerr–Newman
+  // tracer, including the poleFade treatment for the background texture's
+  // own (unrelated) pole degeneracy below.
+  //
+  // An earlier version of this file routed rays whose trajectory swings
+  // close to the spin axis to the Schwarzschild tracer instead, reasoning
+  // that frame dragging vanishes on-axis so ignoring spin there is a safe
+  // approximation, precisely where the Kerr integrator's Θ(θ) (with its
+  // 1/sin³θ terms) was assumed least reliable. That fallback was itself the
+  // bug, not the fix: the two tracers generally land on a *different* final
+  // (θ,φ) for the same ray (frame dragging is small near the axis, but not
+  // exactly zero off it, and the two integrators don't otherwise agree
+  // pixel-for-pixel), so wherever the switch condition crossed there was a
+  // visible seam between two differently-sampled patches of sky. Tried as a
+  // hard switch, this showed up as a wedge spanning the whole frame (fixed
+  // by also requiring a small impact parameter — see git history); tried
+  // again as a smoothly-feathered blend confined close to the hole, it
+  // still showed up as a pair of dark "hourglass cones" reaching out from
+  // the poles, because the two tracers' predicted sky directions disagree
+  // by tens of degrees right at the boundary, not by noise-level amounts —
+  // no amount of feathering hides a disagreement that large. Verified (by
+  // temporarily forcing every spinning/charged ray through this function
+  // alone, no fallback at all) that the direct-UV-sampling fix and the
+  // POLE_GUARD reflection inside traceKerr, on their own, are already
+  // numerically stable enough near the axis — the fallback was solving a
+  // problem that a previous fix had already solved, and only introducing a
+  // new one.
+  vec3 kerrColor(vec3 ro, vec3 rd, out bool captured) {
+    vec2 uv = traceKerr(ro, rd, captured);
+    if (captured) return vec3(0.0);
 
     // An equirectangular texture is mathematically degenerate exactly at
     // its poles (every u maps to the same physical point when v is 0 or 1),
@@ -382,7 +369,20 @@ const FRAGMENT_SHADER = /* glsl */ `
     // seam at all.
     float sinThetaFinal = sin(uv.y * PI);
     float poleFade = smoothstep(0.0, 0.08, sinThetaFinal);
-    gl_FragColor = vec4(texture2D(uBackgroundTexture, uv).rgb * poleFade, 1.0);
+    return texture2D(uBackgroundTexture, uv).rgb * poleFade;
+  }
+
+  void main() {
+    vec3 rd = normalize(vWorldPos - uCameraPos);
+
+    if (uSpin < 1e-4 && uCharge < 1e-4) {
+      bool captured = false;
+      gl_FragColor = vec4(schwarzschildColor(uCameraPos, rd, captured), 1.0);
+      return;
+    }
+
+    bool captured = false;
+    gl_FragColor = vec4(kerrColor(uCameraPos, rd, captured), 1.0);
   }
 `
 
