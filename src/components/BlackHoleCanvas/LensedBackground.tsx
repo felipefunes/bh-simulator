@@ -2,6 +2,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import type { BlackHoleParams } from '../../physics/metric'
+import { INTEGRATOR_QUALITY, type QualityLevel } from '../../physics/renderQuality'
 
 const SPHERE_RADIUS = 500
 // The "ray has escaped" threshold for the lensing integrators. This has to
@@ -106,12 +107,21 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uCharge;
   uniform float uHorizonRadius;
   uniform float uMaxRadius;
+  // Integrator quality (roadmap item 7): step *count* and step *size* are
+  // both uniforms, driven from src/physics/renderQuality.ts's presets,
+  // rather than the fixed consts this used to be. GLSL ES 1.00 requires a
+  // for-loop's bound to be a compile-time constant, so the loops below keep
+  // a fixed hard cap (comfortably above the "high" preset) and break early
+  // once the uniform step count is reached — the cap itself never changes,
+  // only how many iterations actually run before the break.
+  uniform int uSchwSteps;
+  uniform float uSchwDPhi;
+  uniform int uKerrSteps;
+  uniform float uKerrDTau;
   varying vec3 vWorldPos;
 
-  const int MAX_STEPS_SCHW = 220;
-  const float D_PHI = 0.03;
-  const int MAX_STEPS_KERR = 2200;
-  const float D_TAU = 0.0007;
+  const int MAX_STEPS_SCHW_CAP = 400;
+  const int MAX_STEPS_KERR_CAP = 4000;
   const float PI = 3.14159265359;
   const vec3 SPIN_AXIS = vec3(0.0, 1.0, 0.0);
 
@@ -142,25 +152,26 @@ const FRAGMENT_SHADER = /* glsl */ `
     float uMin = 1.0 / uMaxRadius;
     bool escaped = false;
 
-    for (int i = 0; i < MAX_STEPS_SCHW; i++) {
+    for (int i = 0; i < MAX_STEPS_SCHW_CAP; i++) {
+      if (i >= uSchwSteps) break;
       float k1u = v;
       float k1v = -u + 3.0 * uMass * u * u;
-      float u2 = u + (D_PHI * 0.5) * k1u;
-      float v2 = v + (D_PHI * 0.5) * k1v;
+      float u2 = u + (uSchwDPhi * 0.5) * k1u;
+      float v2 = v + (uSchwDPhi * 0.5) * k1v;
       float k2u = v2;
       float k2v = -u2 + 3.0 * uMass * u2 * u2;
-      float u3 = u + (D_PHI * 0.5) * k2u;
-      float v3 = v + (D_PHI * 0.5) * k2v;
+      float u3 = u + (uSchwDPhi * 0.5) * k2u;
+      float v3 = v + (uSchwDPhi * 0.5) * k2v;
       float k3u = v3;
       float k3v = -u3 + 3.0 * uMass * u3 * u3;
-      float u4 = u + D_PHI * k3u;
-      float v4 = v + D_PHI * k3v;
+      float u4 = u + uSchwDPhi * k3u;
+      float v4 = v + uSchwDPhi * k3v;
       float k4u = v4;
       float k4v = -u4 + 3.0 * uMass * u4 * u4;
 
-      u += (D_PHI / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
-      v += (D_PHI / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
-      phi += D_PHI;
+      u += (uSchwDPhi / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
+      v += (uSchwDPhi / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
+      phi += uSchwDPhi;
 
       if (u > uHorizon) { captured = true; return rd; }
       if (u < uMin) { escaped = true; break; }
@@ -258,7 +269,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     float thetaNearPole = Q + cosGuard * cosGuard * (a * a - L * L / (sinGuard * sinGuard));
     bool isPoleCrossing = thetaNearPole > 0.0;
 
-    for (int i = 0; i < MAX_STEPS_KERR; i++) {
+    for (int i = 0; i < MAX_STEPS_KERR_CAP; i++) {
+      if (i >= uKerrSteps) break;
       // derivatives(r, theta, wr, wth) -> (dr, dth, dphi, dwr, dwth), inlined
       // four times for the RK4 stages.
       float k1r = wr;
@@ -271,10 +283,10 @@ const FRAGMENT_SHADER = /* glsl */ `
       float k1dwr = (4.0 * r * P1 - 2.0 * (r - M) * RmL1) / 2.0;
       float k1dwth = (2.0 * c1 * (L * L / (s1 * s1 * s1) - a * a * s1)) / 2.0;
 
-      float r2 = r + (D_TAU * 0.5) * k1r;
-      float th2 = theta + (D_TAU * 0.5) * k1th;
-      float wr2 = wr + (D_TAU * 0.5) * k1dwr;
-      float wth2 = wth + (D_TAU * 0.5) * k1dwth;
+      float r2 = r + (uKerrDTau * 0.5) * k1r;
+      float th2 = theta + (uKerrDTau * 0.5) * k1th;
+      float wr2 = wr + (uKerrDTau * 0.5) * k1dwr;
+      float wth2 = wth + (uKerrDTau * 0.5) * k1dwth;
       float k2r = wr2;
       float k2th = wth2;
       float s2_ = safeSin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
@@ -285,10 +297,10 @@ const FRAGMENT_SHADER = /* glsl */ `
       float k2dwr = (4.0 * r2 * P2 - 2.0 * (r2 - M) * RmL2) / 2.0;
       float k2dwth = (2.0 * c2_ * (L * L / (s2_ * s2_ * s2_) - a * a * s2_)) / 2.0;
 
-      float r3 = r + (D_TAU * 0.5) * k2r;
-      float th3 = theta + (D_TAU * 0.5) * k2th;
-      float wr3 = wr + (D_TAU * 0.5) * k2dwr;
-      float wth3 = wth + (D_TAU * 0.5) * k2dwth;
+      float r3 = r + (uKerrDTau * 0.5) * k2r;
+      float th3 = theta + (uKerrDTau * 0.5) * k2th;
+      float wr3 = wr + (uKerrDTau * 0.5) * k2dwr;
+      float wth3 = wth + (uKerrDTau * 0.5) * k2dwth;
       float k3r = wr3;
       float k3th = wth3;
       float s3_ = safeSin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
@@ -299,10 +311,10 @@ const FRAGMENT_SHADER = /* glsl */ `
       float k3dwr = (4.0 * r3 * P3 - 2.0 * (r3 - M) * RmL3) / 2.0;
       float k3dwth = (2.0 * c3_ * (L * L / (s3_ * s3_ * s3_) - a * a * s3_)) / 2.0;
 
-      float r4 = r + D_TAU * k3r;
-      float th4 = theta + D_TAU * k3th;
-      float wr4 = wr + D_TAU * k3dwr;
-      float wth4 = wth + D_TAU * k3dwth;
+      float r4 = r + uKerrDTau * k3r;
+      float th4 = theta + uKerrDTau * k3th;
+      float wr4 = wr + uKerrDTau * k3dwr;
+      float wth4 = wth + uKerrDTau * k3dwth;
       float k4r = wr4;
       float k4th = wth4;
       float s4_ = safeSin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
@@ -313,11 +325,11 @@ const FRAGMENT_SHADER = /* glsl */ `
       float k4dwr = (4.0 * r4 * P4 - 2.0 * (r4 - M) * RmL4) / 2.0;
       float k4dwth = (2.0 * c4_ * (L * L / (s4_ * s4_ * s4_) - a * a * s4_)) / 2.0;
 
-      r += (D_TAU / 6.0) * (k1r + 2.0 * k2r + 2.0 * k3r + k4r);
-      theta += (D_TAU / 6.0) * (k1th + 2.0 * k2th + 2.0 * k3th + k4th);
-      phi += (D_TAU / 6.0) * (k1dphi + 2.0 * k2dphi + 2.0 * k3dphi + k4dphi);
-      wr += (D_TAU / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
-      wth += (D_TAU / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
+      r += (uKerrDTau / 6.0) * (k1r + 2.0 * k2r + 2.0 * k3r + k4r);
+      theta += (uKerrDTau / 6.0) * (k1th + 2.0 * k2th + 2.0 * k3th + k4th);
+      phi += (uKerrDTau / 6.0) * (k1dphi + 2.0 * k2dphi + 2.0 * k3dphi + k4dphi);
+      wr += (uKerrDTau / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
+      wth += (uKerrDTau / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
 
       // A real photon orbit with L≠0 turns around before ever reaching the
       // pole (Θ(θ) hits zero first) — but a single RK4 step can overshoot
@@ -420,9 +432,11 @@ const FRAGMENT_SHADER = /* glsl */ `
 export function LensedBackground({
   params,
   horizonRadius,
+  quality,
 }: {
   params: BlackHoleParams
   horizonRadius: number
+  quality: QualityLevel
 }) {
   const { camera } = useThree()
   const materialRef = useRef<THREE.ShaderMaterial>(null)
@@ -442,8 +456,12 @@ export function LensedBackground({
       uCharge: { value: params.charge },
       uHorizonRadius: { value: horizonRadius },
       uMaxRadius: { value: MAX_RAY_RADIUS },
+      uSchwSteps: { value: INTEGRATOR_QUALITY[quality].schwSteps },
+      uSchwDPhi: { value: INTEGRATOR_QUALITY[quality].schwDPhi },
+      uKerrSteps: { value: INTEGRATOR_QUALITY[quality].kerrSteps },
+      uKerrDTau: { value: INTEGRATOR_QUALITY[quality].kerrDTau },
     }),
-    [texture, params.mass, params.spin, params.charge, horizonRadius],
+    [texture, params.mass, params.spin, params.charge, horizonRadius, quality],
   )
 
   useFrame(() => {
@@ -455,6 +473,11 @@ export function LensedBackground({
     material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
     material.uniforms.uMaxRadius.value = MAX_RAY_RADIUS
+    const preset = INTEGRATOR_QUALITY[quality]
+    material.uniforms.uSchwSteps.value = preset.schwSteps
+    material.uniforms.uSchwDPhi.value = preset.schwDPhi
+    material.uniforms.uKerrSteps.value = preset.kerrSteps
+    material.uniforms.uKerrDTau.value = preset.kerrDTau
   })
 
   return (

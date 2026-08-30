@@ -1,4 +1,5 @@
 import { classify, isNakedSingularity, type BlackHoleClass } from '../../physics/metric'
+import type { QualityLevel } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
 import './Sidebar.css'
 
@@ -9,15 +10,23 @@ const CLASS_LABELS: Record<BlackHoleClass, string> = {
   'kerr-newman': 'Kerr–Newman',
 }
 
+const QUALITY_LEVELS: { value: QualityLevel; label: string }[] = [
+  { value: 'low', label: 'Baja' },
+  { value: 'medium', label: 'Media' },
+  { value: 'high', label: 'Alta' },
+]
+
 export function Sidebar() {
   const mass = useBlackHoleStore((state) => state.mass)
   const spinRatio = useBlackHoleStore((state) => state.spinRatio)
   const chargeRatio = useBlackHoleStore((state) => state.chargeRatio)
   const showDisk = useBlackHoleStore((state) => state.showDisk)
+  const quality = useBlackHoleStore((state) => state.quality)
   const setMass = useBlackHoleStore((state) => state.setMass)
   const setSpinRatio = useBlackHoleStore((state) => state.setSpinRatio)
   const setChargeRatio = useBlackHoleStore((state) => state.setChargeRatio)
   const setShowDisk = useBlackHoleStore((state) => state.setShowDisk)
+  const setQuality = useBlackHoleStore((state) => state.setQuality)
 
   const params = useBlackHoleParams()
   const naked = isNakedSingularity(params)
@@ -85,6 +94,26 @@ export function Sidebar() {
         <span className="sidebar__control-label">Mostrar disco de acreción</span>
       </label>
 
+      <div className="sidebar__control">
+        <span className="sidebar__control-label">Calidad</span>
+        <div className="sidebar__quality-group" role="radiogroup" aria-label="Calidad">
+          {QUALITY_LEVELS.map(({ value, label }) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={quality === value}
+              className={
+                quality === value ? 'sidebar__quality-button sidebar__quality-button--active' : 'sidebar__quality-button'
+              }
+              onClick={() => setQuality(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <p className="sidebar__note">
         La rotación del disco se muestra acelerada (×15) para que se note a esta
         escala visual — la velocidad orbital real es Kepleriana correcta, pero
@@ -92,8 +121,9 @@ export function Sidebar() {
       </p>
 
       <p className="sidebar__note">
-        Controles de calidad (balance entre fidelidad del shader y rendimiento en
-        GPUs modestas) se agregan en un próximo PR.
+        "Calidad" ajusta los pasos del integrador de la lente (menos precisión pero
+        más rendimiento en "Baja") y el pixel ratio del render — útil en GPUs
+        modestas o si el navegador se siente forzado, especialmente con spin alto.
       </p>
     </aside>
   )

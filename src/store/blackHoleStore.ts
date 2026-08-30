@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { BlackHoleParams } from '../physics/metric'
+import type { QualityLevel } from '../physics/renderQuality'
 
 interface BlackHoleStore {
   mass: number
@@ -9,10 +10,13 @@ interface BlackHoleStore {
   chargeRatio: number
   /** Purely a visual QA toggle — hides AccretionDisk so lensing artifacts near the poles/shadow aren't obscured by disk geometry. */
   showDisk: boolean
+  /** Integrator steps + pixel ratio trade-off — see physics/renderQuality.ts. */
+  quality: QualityLevel
   setMass: (mass: number) => void
   setSpinRatio: (spinRatio: number) => void
   setChargeRatio: (chargeRatio: number) => void
   setShowDisk: (showDisk: boolean) => void
+  setQuality: (quality: QualityLevel) => void
 }
 
 export const useBlackHoleStore = create<BlackHoleStore>((set) => ({
@@ -20,10 +24,12 @@ export const useBlackHoleStore = create<BlackHoleStore>((set) => ({
   spinRatio: 0,
   chargeRatio: 0,
   showDisk: true,
+  quality: 'medium',
   setMass: (mass) => set({ mass }),
   setSpinRatio: (spinRatio) => set({ spinRatio }),
   setChargeRatio: (chargeRatio) => set({ chargeRatio }),
   setShowDisk: (showDisk) => set({ showDisk }),
+  setQuality: (quality) => set({ quality }),
 }))
 
 /** The store's sliders as the absolute mass/spin/charge the physics module expects. */
