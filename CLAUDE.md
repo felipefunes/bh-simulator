@@ -351,6 +351,18 @@ clasificación del caso) de forma aislada del render.
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
 
+## Known issues
+
+- **Artefacto residual cerca del eje de spin** (línea punteada / arcos tenues, spin
+  alto + cámara en ángulo pronunciado): sobrevivió a cinco rondas de fixes reales
+  durante el PR 6 (cada una documentada arriba, en la sección de ese PR) y se aceptó
+  como limitación conocida en vez de seguir iterando indefinidamente. Detalle completo,
+  hipótesis pendientes y cómo reproducir en
+  [issue #7](https://github.com/felipefunes/bh-simulator/issues/7). Probablemente se
+  retome junto con el ítem 7 del roadmap (controles de calidad) o con una
+  reformulación del integrador de Kerr que evite la coordenada singular del polo
+  (sustitución μ=cosθ) en vez de parchar `POLE_GUARD` caso por caso.
+
 ## Deploy
 
 Blueprint de Render.com como Static Site: ver `render.yaml` en la raíz. Build command
