@@ -2,7 +2,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import type { BlackHoleParams } from '../../physics/metric'
-import { INTEGRATOR_QUALITY, type QualityLevel } from '../../physics/renderQuality'
+import { INTEGRATOR_QUALITY, KERR_D_TAU, KERR_STEPS, type QualityLevel } from '../../physics/renderQuality'
 
 const SPHERE_RADIUS = 500
 // The "ray has escaped" threshold for the lensing integrators. This has to
@@ -129,7 +129,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
-  const int MAX_STEPS_KERR_CAP = 4000;
+  const int MAX_STEPS_KERR_CAP = 6000;
   const float PI = 3.14159265359;
   const vec3 SPIN_AXIS = vec3(0.0, 1.0, 0.0);
   const float PEAK_TEMPERATURE_KELVIN = 14000.0;
@@ -210,6 +210,26 @@ const FRAGMENT_SHADER = /* glsl */ `
     return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
   }
 
+  // Checks one segment of a Schwarzschild ray's step for a disk-plane
+  // (world-space y=0) crossing — see traceSchwarzschild's use of this (four
+  // calls per step, across its RK4 stage points, mirroring checkDiskSegment
+  // for Kerr's θ) for why a single per-step endpoint check isn't enough.
+  bool checkDiskSegmentY(
+    float aR, float aPhi, float bR, float bPhi,
+    float e1y, float e2y, float innerRadius, float outerRadius,
+    out float hitRadius, out float hitPhi
+  ) {
+    float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y);
+    float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y);
+    if (ay * by >= 0.0) return false;
+    float fraction = ay / (ay - by);
+    float r = aR + fraction * (bR - aR);
+    if (r < innerRadius || r > outerRadius) return false;
+    hitRadius = r;
+    hitPhi = aPhi + fraction * (bPhi - aPhi);
+    return true;
+  }
+
   vec3 traceSchwarzschild(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
     diskHit = false;
     float r0 = length(ro);
@@ -257,26 +277,37 @@ const FRAGMENT_SHADER = /* glsl */ `
       phi += uSchwDPhi;
 
       // Disk plane (world-space y=0) crossing — see traceSchwarzschildRay's
-      // doc comment in physics/lensing.ts for the full derivation. e1/e2
-      // are this ray's own world-space orbital-plane basis, so their y
+      // doc comment in physics/lensing.ts for the full derivation (e1/e2 are
+      // this ray's own world-space orbital-plane basis, so their y
       // components are all that's needed to reconstruct the position's
-      // y-coordinate at each step without a full 3D reconstruction.
+      // y-coordinate without a full 3D reconstruction) and for why this
+      // checks the RK4 stage points rather than just this step's two
+      // endpoints. φ is the independent variable here (not integrated), so
+      // stages 2 and 3 both land at exactly prevPhi + dPhi/2 and stage 4 at
+      // exactly prevPhi + dPhi — no interpolation needed for φ, only r
+      // (=1/u2, 1/u3, 1/u4) differs between them.
       if (uDiskInnerRadius > 0.0) {
         float prevR = 1.0 / prevU;
+        float r2 = 1.0 / u2;
+        float r3 = 1.0 / u3;
+        float r4 = 1.0 / u4;
+        float phiMid = prevPhi + uSchwDPhi * 0.5;
+        float phiEnd = prevPhi + uSchwDPhi;
         float newR = 1.0 / u;
-        float yPrev = prevR * (cos(prevPhi) * e1.y + sin(prevPhi) * e2.y);
-        float yNew = newR * (cos(phi) * e1.y + sin(phi) * e2.y);
-        if (yPrev * yNew < 0.0) {
-          float fraction = yPrev / (yPrev - yNew);
-          float hitR = prevR + fraction * (newR - prevR);
-          if (hitR >= uDiskInnerRadius && hitR <= uDiskOuterRadius) {
-            float hitPhi = prevPhi + fraction * (phi - prevPhi);
-            diskHit = true;
-            diskRadius = hitR;
-            diskPosition = hitR * cos(hitPhi) * e1 + hitR * sin(hitPhi) * e2;
-            captured = false;
-            return rd;
-          }
+
+        float hitR;
+        float hitPhi;
+        if (
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
+        ) {
+          diskHit = true;
+          diskRadius = hitR;
+          diskPosition = hitR * cos(hitPhi) * e1 + hitR * sin(hitPhi) * e2;
+          captured = false;
+          return rd;
         }
       }
 
@@ -321,6 +352,27 @@ const FRAGMENT_SHADER = /* glsl */ `
   // straight from the already-smooth, already-accumulated phi sidesteps
   // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
   // handles phi being outside [-π, π] for free.
+  // Checks one segment of a Kerr ray's step for a disk-plane (θ=π/2)
+  // crossing — see traceKerr's use of this (four calls per step, across
+  // its RK4 stage points) for why a single per-step endpoint check isn't
+  // enough. Takes explicit points rather than an array to stay clear of
+  // GLSL ES 1.00's restrictions on dynamically-indexed arrays.
+  bool checkDiskSegment(
+    float aR, float aTheta, float aPhi,
+    float bR, float bTheta, float bPhi,
+    vec3 xRef, vec3 yRef, float innerRadius, float outerRadius,
+    out float hitRadius, out vec3 hitPosition
+  ) {
+    if ((aTheta - PI * 0.5) * (bTheta - PI * 0.5) >= 0.0) return false;
+    float fraction = (PI * 0.5 - aTheta) / (bTheta - aTheta);
+    float r = aR + fraction * (bR - aR);
+    if (r < innerRadius || r > outerRadius) return false;
+    float hitPhi = aPhi + fraction * (bPhi - aPhi);
+    hitRadius = r;
+    hitPosition = r * cos(hitPhi) * xRef + r * sin(hitPhi) * yRef;
+    return true;
+  }
+
   vec2 traceKerr(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
     diskHit = false;
     float M = uMass;
@@ -444,17 +496,39 @@ const FRAGMENT_SHADER = /* glsl */ `
       wth += (uKerrDTau / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
 
       // Disk plane (θ=π/2) crossing — see traceKerrRay's doc comment in
-      // physics/kerrLensing.ts for the full derivation. Checked before the
-      // POLE_GUARD block below, which only ever adjusts theta near the
-      // poles (far from π/2) and is irrelevant either way.
-      if (uDiskInnerRadius > 0.0 && (prevTheta - PI * 0.5) * (theta - PI * 0.5) < 0.0) {
-        float fraction = (PI * 0.5 - prevTheta) / (theta - prevTheta);
-        float hitR = prevR + fraction * (r - prevR);
-        if (hitR >= uDiskInnerRadius && hitR <= uDiskOuterRadius) {
-          float hitPhi = prevPhi + fraction * (phi - prevPhi);
+      // physics/kerrLensing.ts for the full derivation, and in particular
+      // for why this checks the RK4 stage points (start → stage 2 → stage 3
+      // → stage 4 → end) rather than just this step's two endpoints or a
+      // linear subdivision of them. A same-step crossing near the photon
+      // sphere can otherwise alias away (found via visual QA as a literal
+      // notch bitten out of the lensed disk at moderate-to-high spin) —
+      // and linear interpolation between two same-side endpoints
+      // *cannot* reveal it no matter how finely subdivided, since it's
+      // monotonic between them by construction (confirmed empirically: an
+      // 8-point subdivision left the notch completely unchanged). The
+      // stage points r2/th2, r3/th3, r4/th4 above are already real
+      // derivative evaluations through the step (not interpolation), so a
+      // same-step dip that reaches one does show up; phi2/phi3/phi4 here
+      // cost only three extra multiply-adds since k1dphi/k2dphi/k3dphi are
+      // already computed above. Checked before the POLE_GUARD block below,
+      // which only ever adjusts theta near the poles (far from π/2) and is
+      // irrelevant either way.
+      if (uDiskInnerRadius > 0.0) {
+        float phi2 = phi + (uKerrDTau * 0.5) * k1dphi;
+        float phi3 = phi + (uKerrDTau * 0.5) * k2dphi;
+        float phi4 = phi + uKerrDTau * k3dphi;
+
+        float hitR;
+        vec3 hitPos;
+        if (
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
+        ) {
           diskHit = true;
           diskRadius = hitR;
-          diskPosition = hitR * cos(hitPhi) * xRef + hitR * sin(hitPhi) * yRef;
+          diskPosition = hitPos;
           captured = false;
           return vec2(0.0);
         }
@@ -598,8 +672,9 @@ export function LensedBackground({
       uMaxRadius: { value: MAX_RAY_RADIUS },
       uSchwSteps: { value: INTEGRATOR_QUALITY[quality].schwSteps },
       uSchwDPhi: { value: INTEGRATOR_QUALITY[quality].schwDPhi },
-      uKerrSteps: { value: INTEGRATOR_QUALITY[quality].kerrSteps },
-      uKerrDTau: { value: INTEGRATOR_QUALITY[quality].kerrDTau },
+      // Not quality-dependent — see renderQuality.ts's doc comment on KERR_STEPS.
+      uKerrSteps: { value: KERR_STEPS },
+      uKerrDTau: { value: KERR_D_TAU },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
     }),
@@ -618,8 +693,8 @@ export function LensedBackground({
     const preset = INTEGRATOR_QUALITY[quality]
     material.uniforms.uSchwSteps.value = preset.schwSteps
     material.uniforms.uSchwDPhi.value = preset.schwDPhi
-    material.uniforms.uKerrSteps.value = preset.kerrSteps
-    material.uniforms.uKerrDTau.value = preset.kerrDTau
+    material.uniforms.uKerrSteps.value = KERR_STEPS
+    material.uniforms.uKerrDTau.value = KERR_D_TAU
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
   })

@@ -418,6 +418,50 @@ clasificación del caso) de forma aislada del render.
      sigue ocultándolo por completo (pasa `null` en vez de bounds reales,
      deshabilitando el chequeo de cruce vía el sentinel `innerRadius <= 0`); los
      tres niveles de calidad del PR 7 renderizan sin errores con el disco activo.
+   - **Segundo bug, más serio, encontrado en la siguiente review**: con spin o
+     carga (Kerr/Reissner–Nordström/Kerr–Newman) el disco aparecía con un
+     "mordisco" — una cuña completa faltante — a spin moderado, y directamente
+     desaparecía casi por completo a spin extremal. Schwarzschild (spin=carga=0)
+     nunca lo mostró, porque no comparte el integrador afectado.
+     - Diagnóstico inicial (equivocado): pareció un problema de *muestreo* — cerca
+       de la esfera de fotones, θ puede cruzar π/2 y volver dentro de un único
+       paso de RK4, y si ambos extremos del paso caen del mismo lado, el chequeo
+       de cruce (que sólo miraba los dos extremos) no ve ningún cambio de signo.
+       Se probó re-chequear varios puntos interpolados linealmente dentro de cada
+       paso — no cambió nada en absoluto. Segunda vuelta: se probó reusar los
+       puntos intermedios *reales* del propio RK4 (r2/θ2, r3/θ3, r4/θ4, ya
+       calculados para el paso de integración, no interpolados) — tampoco cambió
+       nada. Ambos intentos fallaron por la misma razón de fondo: el problema no
+       era *dónde* se mira dentro del paso, sino que el paso en sí, con el δτ de
+       calidad "Media"/"Baja", es demasiado grande para que la solución numérica
+       *alcance* el verdadero extremo de θ cerca de la esfera de fotones — no es
+       que la trayectoria correcta cruce π/2 y el muestreo se lo pierda, es que la
+       trayectoria *calculada* con ese δτ nunca llega a cruzarlo. Confirmado
+       cambiando manualmente sólo la calidad a "Alta" (δτ más fino, mismo rango
+       total integrado): el mordisco desaparecía sin tocar nada más del código.
+     - Fix real: la precisión del integrador de Kerr **deja de depender del
+       selector de calidad**. Antes, "Baja"/"Media"/"Alta" escalaban steps y δτ
+       de Kerr igual que los de Schwarzschild (ver PR 7) — ahora `KERR_STEPS`/
+       `KERR_D_TAU` en `renderQuality.ts` son una constante fija (6000 pasos,
+       δτ ajustado para mantener el mismo rango total integrado de siempre), y
+       el selector de calidad sólo controla los pasos de Schwarzschild (donde sí
+       es seguro reducirlos) y el pixel ratio del render (que sigue aplicando
+       parejo, con o sin spin). No es un descuido: bajar la precisión de Kerr no
+       sólo se ve peor, directamente da un resultado *incorrecto* (geometría con
+       agujeros) — y eso es peor que un render más lento. El motivo original de
+       "Calidad" (PR 7, rendimiento) queda intacto para el caso común
+       (Schwarzschild, o pixel ratio en cualquier caso); lo que se pierde es la
+       posibilidad de bajar el costo de Kerr específicamente, hasta que exista un
+       integrador de paso adaptativo (δτ más fino sólo cerca de la esfera de
+       fotones, normal en el resto) — trabajo futuro, ver `renderQuality.ts`.
+     - Verificado en el navegador en el peor caso conocido (spin=1.00 extremal,
+       calidad "Baja", que antes hacía desaparecer el disco casi por completo):
+       disco completo, sin mordiscos, con un ligero grano/ruido numérico sólo en
+       el borde más cercano al eje — un residuo mucho más sutil, consistente con
+       que ISCO≈horizonte en el límite extremal es un régimen genuinamente
+       delicado, no con el bug original. Repetido con carga (Reissner–Nordström)
+       en "Baja": mismo resultado limpio, confirmando que el fix cubre el
+       integrador Kerr–Newman completo (no sólo el caso de spin puro).
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

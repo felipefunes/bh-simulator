@@ -41,6 +41,7 @@ export interface TraceOptions {
   disk?: DiskBounds
 }
 
+
 /**
  * Traces a light ray through the Schwarzschild deflection field.
  *
@@ -115,19 +116,46 @@ export function traceSchwarzschildRay(
     phi += dPhi
 
     if (disk) {
+      // Checked via the RK4 stage points (start → stage 2 → stage 3 →
+      // stage 4 → end), not a linear subdivision of the two endpoints —
+      // see kerrLensing.ts's traceKerrRay for why: linear interpolation
+      // between two points on the same side of the disk plane is
+      // monotonic and cannot reveal an in-between dip no matter how
+      // finely subdivided, while the stage points are real evaluations
+      // through the step (here, r2/r3/r4 = 1/u2, 1/u3, 1/u4 are already
+      // computed above; this φ parametrization makes the stage φ values
+      // exact rather than approximated — φ is the independent variable
+      // here, not integrated, so stages 2 and 3 both land at exactly
+      // prevPhi + dPhi/2 and stage 4 at exactly prevPhi + dPhi).
       const prevR = 1 / prevU
+      const r2 = 1 / u2
+      const r3 = 1 / u3
+      const r4 = 1 / u4
+      const phiMid = prevPhi + dPhi / 2
+      const phiEnd = prevPhi + dPhi
       const newR = 1 / u
-      const yPrev = prevR * (Math.cos(prevPhi) * disk.e1[1] + Math.sin(prevPhi) * disk.e2[1])
-      const yNew = newR * (Math.cos(phi) * disk.e1[1] + Math.sin(phi) * disk.e2[1])
-      if (yPrev * yNew < 0) {
-        // Linear interpolation for the zero-crossing — accurate enough at
-        // these step sizes, same caveat as kerrLensing.ts's equivalent check.
-        const fraction = yPrev / (yPrev - yNew)
-        const hitR = prevR + fraction * (newR - prevR)
-        if (hitR >= disk.innerRadius && hitR <= disk.outerRadius) {
-          const hitPhi = prevPhi + fraction * (phi - prevPhi)
-          const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
-          return { captured: false, diskHit: { radius: hitR, position } }
+
+      const points: readonly [number, number][] = [
+        [prevR, prevPhi],
+        [r2, phiMid],
+        [r3, phiMid],
+        [r4, phiEnd],
+        [newR, phiEnd],
+      ]
+
+      for (let i = 1; i < points.length; i++) {
+        const [aR, aPhi] = points[i - 1]
+        const [bR, bPhi] = points[i]
+        const yPrev = aR * (Math.cos(aPhi) * disk.e1[1] + Math.sin(aPhi) * disk.e2[1])
+        const yNew = bR * (Math.cos(bPhi) * disk.e1[1] + Math.sin(bPhi) * disk.e2[1])
+        if (yPrev * yNew < 0) {
+          const fraction = yPrev / (yPrev - yNew)
+          const hitR = aR + fraction * (bR - aR)
+          if (hitR >= disk.innerRadius && hitR <= disk.outerRadius) {
+            const hitPhi = aPhi + fraction * (bPhi - aPhi)
+            const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
+            return { captured: false, diskHit: { radius: hitR, position } }
+          }
         }
       }
     }

@@ -210,9 +210,18 @@ export function traceKerrRay(
     const prevPhi = phi
 
     const k1 = derivatives(r, theta, wr, wth)
-    const k2 = derivatives(r + (dTau / 2) * k1[0], theta + (dTau / 2) * k1[1], wr + (dTau / 2) * k1[3], wth + (dTau / 2) * k1[4])
-    const k3 = derivatives(r + (dTau / 2) * k2[0], theta + (dTau / 2) * k2[1], wr + (dTau / 2) * k2[3], wth + (dTau / 2) * k2[4])
-    const k4 = derivatives(r + dTau * k3[0], theta + dTau * k3[1], wr + dTau * k3[3], wth + dTau * k3[4])
+    const r2 = r + (dTau / 2) * k1[0]
+    const th2 = theta + (dTau / 2) * k1[1]
+    const phi2 = phi + (dTau / 2) * k1[2]
+    const k2 = derivatives(r2, th2, wr + (dTau / 2) * k1[3], wth + (dTau / 2) * k1[4])
+    const r3 = r + (dTau / 2) * k2[0]
+    const th3 = theta + (dTau / 2) * k2[1]
+    const phi3 = phi + (dTau / 2) * k2[2]
+    const k3 = derivatives(r3, th3, wr + (dTau / 2) * k2[3], wth + (dTau / 2) * k2[4])
+    const r4 = r + dTau * k3[0]
+    const th4 = theta + dTau * k3[1]
+    const phi4 = phi + dTau * k3[2]
+    const k4 = derivatives(r4, th4, wr + dTau * k3[3], wth + dTau * k3[4])
 
     r += (dTau / 6) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
     theta += (dTau / 6) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
@@ -221,19 +230,57 @@ export function traceKerrRay(
     wth += (dTau / 6) * (k1[4] + 2 * k2[4] + 2 * k3[4] + k4[4])
 
     // The disk is opaque and lies exactly in the equatorial plane (θ=π/2),
-    // so a crossing here — interpolated linearly between this step and the
-    // last, which is accurate enough at these step sizes since the disk is
-    // thin compared to the radial distance covered per step — terminates
-    // the trace immediately, the same way capture does. Must be checked
-    // before the POLE_GUARD block below, which only ever adjusts theta near
-    // the poles (far from π/2) and would otherwise be irrelevant either way.
-    if (disk && (prevTheta - HALF_PI) * (theta - HALF_PI) < 0) {
-      const fraction = (HALF_PI - prevTheta) / (theta - prevTheta)
-      const hitRadius = prevR + fraction * (r - prevR)
-      if (hitRadius >= disk.innerRadius && hitRadius <= disk.outerRadius) {
-        const hitPhi = prevPhi + fraction * (phi - prevPhi)
-        const position = add(scale(xRef, hitRadius * Math.cos(hitPhi)), scale(yRef, hitRadius * Math.sin(hitPhi)))
-        return { captured: false, diskHit: { radius: hitRadius, position } }
+    // so a crossing here terminates the trace immediately, the same way
+    // capture does. Must be checked before the POLE_GUARD block below,
+    // which only ever adjusts theta near the poles (far from π/2) and
+    // would otherwise be irrelevant either way.
+    //
+    // Checking only the step's two endpoints (as this originally did) can
+    // miss a crossing: near the photon sphere, θ can swing past π/2 and
+    // back within a *single* RK4 step (strongly-bent, near-critical rays
+    // are exactly where this happens), and if both endpoints land on the
+    // same side, the endpoint-only check sees no sign change — found via
+    // visual QA as a literal wedge/"notch" bitten out of the disk's lensed
+    // image at moderate-to-high spin, confirmed as a step-size issue (not a
+    // deeper physics/algorithm bug) because the "high" quality preset's
+    // finer dτ made it vanish with no other change.
+    //
+    // The fix is *not* to linearly interpolate more points between the two
+    // endpoints — that can't work: linear interpolation between two points
+    // on the same side of π/2 is monotonic and mathematically cannot dip to
+    // the other side no matter how finely it's subdivided, regardless of
+    // what the true curve did in between (confirmed empirically: an
+    // 8-point subdivision of just the endpoints left the notch completely
+    // unchanged). What actually carries curvature information are the RK4
+    // stage evaluations themselves — (r2,θ2), (r3,θ3), (r4,θ4) above are
+    // already real evaluations of the derivative at three different points
+    // through the step, not interpolation, so a same-step dip that reaches
+    // an actual stage point does show up. Checking consecutive pairs
+    // (start → stage 2 → stage 3 → stage 4 → end) costs nothing extra
+    // (those stage values are already computed for the RK4 update above,
+    // this only adds the phi2/phi3/phi4 bookkeeping) and resolved the notch
+    // in visual testing where the subdivision approach did not.
+    if (disk) {
+      const points: readonly [number, number, number][] = [
+        [prevR, prevTheta, prevPhi],
+        [r2, th2, phi2],
+        [r3, th3, phi3],
+        [r4, th4, phi4],
+        [r, theta, phi],
+      ]
+
+      for (let i = 1; i < points.length; i++) {
+        const [aR, aTheta, aPhi] = points[i - 1]
+        const [bR, bTheta, bPhi] = points[i]
+        if ((aTheta - HALF_PI) * (bTheta - HALF_PI) < 0) {
+          const fraction = (HALF_PI - aTheta) / (bTheta - aTheta)
+          const hitRadius = aR + fraction * (bR - aR)
+          if (hitRadius >= disk.innerRadius && hitRadius <= disk.outerRadius) {
+            const hitPhi = aPhi + fraction * (bPhi - aPhi)
+            const position = add(scale(xRef, hitRadius * Math.cos(hitPhi)), scale(yRef, hitRadius * Math.sin(hitPhi)))
+            return { captured: false, diskHit: { radius: hitRadius, position } }
+          }
+        }
       }
     }
 
