@@ -4,6 +4,16 @@ import * as THREE from 'three'
 import type { BlackHoleParams } from '../../physics/metric'
 
 const SPHERE_RADIUS = 500
+// The "ray has escaped" threshold for the lensing integrators. This has to
+// stay comfortably larger than the camera's actual distance from the black
+// hole (fixed by BlackHoleCanvas's hardcoded camera position, ~122 units —
+// it does NOT scale with mass) and smaller than SPHERE_RADIUS. It used to
+// scale with mass (300 * mass), which put it *below* the camera distance
+// at low mass (e.g. 90 at mass=0.3) — every ray then satisfied "escaped"
+// after essentially zero integration, at close to the same starting
+// theta/phi for every pixel regardless of screen position, collapsing the
+// entire lensed background to a single sampled texture color.
+const MAX_RAY_RADIUS = 400
 const TEXTURE_WIDTH = 2048
 const TEXTURE_HEIGHT = 1024
 const STAR_COUNT = 3000
@@ -352,7 +362,7 @@ export function LensedBackground({
       uSpin: { value: params.spin },
       uCharge: { value: params.charge },
       uHorizonRadius: { value: horizonRadius },
-      uMaxRadius: { value: 300 * params.mass },
+      uMaxRadius: { value: MAX_RAY_RADIUS },
     }),
     [texture, params.mass, params.spin, params.charge, horizonRadius],
   )
@@ -365,7 +375,7 @@ export function LensedBackground({
     material.uniforms.uSpin.value = params.spin
     material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
-    material.uniforms.uMaxRadius.value = 300 * params.mass
+    material.uniforms.uMaxRadius.value = MAX_RAY_RADIUS
   })
 
   return (

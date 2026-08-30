@@ -175,6 +175,19 @@ clasificación del caso) de forma aislada del render.
      `traceKerr()`/`LensedBackground.tsx`. Diagnosticado pasando `finalDir`
      directo al framebuffer como color: la discontinuidad era visible ahí
      mismo, antes incluso de tocar la textura.
+   - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
+     del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
+     Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se
+     calculaba como `300 * mass`, pero la cámara está a una distancia FIJA
+     (~122 unidades, hardcodeada en `BlackHoleCanvas` y no reactiva a la masa)
+     — a masa=0.3, `uMaxRadius=90 < 122`. La cámara arrancaba entonces más allá
+     del propio umbral de escape del integrador: cada rayo cumplía "escapé"
+     casi en el primer paso, con θ/φ prácticamente sin cambios respecto al
+     valor inicial (que es el mismo para todos los píxeles, ya que solo
+     depende de la posición de la cámara) — es decir, toda la pantalla
+     terminaba sampleando el mismo píxel de la textura. Fix: `uMaxRadius` es
+     ahora una constante fija (`MAX_RAY_RADIUS = 400` en `LensedBackground.tsx`),
+     desacoplada de la masa, siempre mayor a la distancia real de cámara.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
    fidelidad vs. rendimiento en GPUs modestas.
 8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
