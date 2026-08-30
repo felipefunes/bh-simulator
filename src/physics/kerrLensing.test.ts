@@ -126,6 +126,29 @@ describe('traceKerrRay', () => {
     expect(outsideResult.captured).toBe(false)
   })
 
+  it('stays numerically finite for a ray aimed close to the spin axis (near the pole singularity)', () => {
+    const a = 0.9
+    const horizonRadius = mass + Math.sqrt(mass * mass - a * a)
+    // Camera almost directly above the pole, aimed almost straight down at
+    // the black hole — theta stays close to 0 for most of the trajectory,
+    // right where Θ(θ)'s sin²θ/sin³θ terms are most sensitive. Regression
+    // test for the pole-singularity artifact found via visual review (a
+    // bright line straight along the spin axis at high spin).
+    const cameraPos = [1, 60, 0] as const
+    const rayDir = [-1 / Math.sqrt(3601), -60 / Math.sqrt(3601), 0] as const
+
+    const result = traceKerrRay({ mass, spin: a, horizonRadius }, cameraPos, rayDir, spinAxis, {
+      maxSteps: 20000,
+      dTau: 0.0005,
+      maxRadius: 300,
+    })
+
+    expect(typeof result.captured).toBe('boolean')
+    if (!result.captured) {
+      expect(result.direction!.every((component) => Number.isFinite(component))).toBe(true)
+    }
+  })
+
   it('shows the frame-dragging asymmetry: the same |b| can be captured prograde but escape retrograde', () => {
     const a = 0.99
     const horizonRadius = mass + Math.sqrt(mass * mass - a * a)

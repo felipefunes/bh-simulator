@@ -137,10 +137,216 @@ clasificación del caso) de forma aislada del render.
    - Pendiente, no bloqueante: visualizar la ergosfera (la fórmula general con
      dependencia en θ ya se puede derivar de `ergosphereEquatorialRadius`, pero no se
      implementó en este PR — el foco fue el shader).
-6. Disco de acreción con gradiente de temperatura físico + beaming Doppler y corrimiento
-   al rojo gravitacional.
+6. ✅ **Disco de acreción físico**: `src/physics/accretionDisk.ts` — perfil de
+   temperatura de Shakura–Sunyaev (T⁴ ∝ r⁻³(1−√(r_in/r)), pico en r=49/36 r_in),
+   color de cuerpo negro (aproximación polinómica, tipo Tanner Helland), velocidad
+   orbital local v(r)=√(M/(r−2M)) (da exactamente c en la esfera de fotones y 0.5c
+   en la ISCO — dos checkpoints conocidos) y el factor combinado de corrimiento
+   Doppler + gravitacional 1+z = γ(1−β·n̂)/√(1−2M/r) (Luminet 1979). Todo testeado
+   en vitest antes de portarse a GLSL, mismo patrón que PRs anteriores.
+   `AccretionDisk` ahora usa un `shaderMaterial` propio (no el `pointsMaterial` de
+   antes): cada partícula lleva su temperatura base y su dirección de velocidad
+   tangencial como atributos, y el vertex shader recalcula color y brillo cada
+   frame según la posición actual de la cámara — el beaming es visible como una
+   asimetría de brillo entre el lado que se acerca y el que se aleja. Aproximación
+   documentada: las fórmulas usan solo masa (Schwarzschild), igual que el shader de
+   lente antes del PR 5 — extender a Kerr/Kerr–Newman queda como trabajo futuro.
+   El disco se ensanchó de 3.5× a 10× el radio interno (y la cámara se alejó a
+   juego) porque con el radio anterior toda la temperatura visible quedaba en el
+   mismo extremo caliente/azul de la curva de cuerpo negro, sin espacio para
+   enfriarse hacia el naranja.
+   - Ajustes post-review: partículas del disco con sprite circular difuminado
+     (antes eran cuadrados duros — `gl_PointCoord` + `smoothstep` en el fragment
+     shader) y velocidad angular multiplicada ×15 solo para legibilidad visual
+     (`VISUAL_TIME_SCALE` en `AccretionDisk.tsx`) — la velocidad Keplariana real
+     a esta escala es de minutos por vuelta incluso en el borde interno.
+   - Bug encontrado en review visual: a spin alto aparecía una línea brillante
+     recorriendo toda la pantalla exactamente sobre el eje de spin (parecía un
+     "jet", pero no lo es — no hay jets relativistas modelados, eso es un
+     fenómeno electromagnético/MHD, no puramente gravitacional). Causa real:
+     el shader de Kerr reconstruía la dirección final como un vector cartesiano
+     (`sinθ·cosφ, sinθ·senφ, cosθ`) y volvía a extraer φ de ese vector con
+     `atan2` para muestrear la textura equirectangular — ese viaje de ida y
+     vuelta es exactamente donde una textura equirect tiene su singularidad de
+     polo: cuando sinθ→0, las componentes x/z son casi cero y `atan2` de dos
+     números casi-cero es numéricamente inestable. El fix fue samplear la
+     textura directamente desde θ/φ ya acumulados en la integración (nunca
+     pasar por la reconstrucción cartesiana) — ver el comment en
+     `traceKerr()`/`LensedBackground.tsx`. Diagnosticado pasando `finalDir`
+     directo al framebuffer como color: la discontinuidad era visible ahí
+     mismo, antes incluso de tocar la textura.
+     - Ese fix redujo el problema pero no lo eliminó: en ángulos de cámara
+       donde muchos rayos pasan cerca del eje, seguía apareciendo (ahora
+       como una cadena periódica de imágenes fantasma de la mancha de
+       galaxia, tipo "cuentas de un collar" subiendo por el eje, en vez de
+       una sola línea). Un primer parche (reflejar θ/w_θ como una pared
+       artificial al acercarse al polo, más un fade a negro en las
+       muestras cercanas al polo) mejoraba pero no resolvía esto — la
+       cadena aparecía en un rango de θ mucho más ancho que el que ese
+       fade cubría razonablemente.
+     - Fix definitivo: en vez de seguir parchando la integración (r,θ,φ)
+       justo donde es numéricamente frágil, la esquivamos. Se estima
+       sin(θ_min) ≈ |L|/√(L²+Q) (de la expansión de Θ(θ) a ángulo chico) —
+       la latitud más cercana al polo que la trayectoria alcanzaría. Si esa
+       estimación da por debajo de un umbral, el rayo se traza con
+       `traceSchwarzschild` (solo masa) en vez de `traceKerr`. No es solo
+       un atajo cómodo: el frame dragging es más fuerte en el plano
+       ecuatorial y se anula exactamente sobre el eje de spin, así que
+       ignorar el spin ahí es también la aproximación *más precisa*
+       disponible justo donde el integrador completo es menos confiable.
+       Verificado en el navegador con spin extremal (1.0) y masa mínima
+       (0.3) combinados, en varios ángulos de cámara incluyendo vista
+       casi-polar — sin línea, sin cadena de imágenes, sin errores.
+     - Ese mismo fix, sin embargo, introdujo un bug propio (reportado como
+       "¿esto son jets?" en review — no lo son, no hay jets relativistas
+       modelados, eso es MHD/electromagnético): sin(θ_min) por sí solo no
+       distingue *dirección* de *distancia*. Todo rayo en el plano vertical
+       que contiene la cámara y el eje de spin tiene L=0 exacto, sin
+       importar qué tan lejos del agujero apunte — sin un chequeo de
+       distancia, ese plano entero (una cuña gigante atravesando toda la
+       pantalla en perspectiva) se enviaba al fallback de Schwarzschild.
+       Diagnosticado coloreando qué tracer atendió cada píxel (rojo =
+       capturado, azul = fallback, verde = Kerr completo): la cuña oscura
+       que parecía un jet no era sombra en absoluto — era la región del
+       fallback muestreando una parte del cielo distinta (y coincidentemente
+       más oscura) que la que el Kerr real hubiera mostrado ahí. Fix: exigir
+       además que el parámetro de impacto total (L²+Q) sea chico (rayo
+       realmente apuntando cerca del agujero, `< (20M)²`) antes de activar
+       el fallback — así se confina al entorno real de la sombra, donde la
+       aproximación tiene sentido, en vez de a cualquier rayo en ese plano
+       sin importar qué tan lejos pase.
+     - Ese fix (más acotado) trajo un tercer bug, reportado en review como
+       "conos con forma de reloj de arena" saliendo de los polos (además de
+       los "jets" que seguían viéndose): la región del fallback, ahora
+       confinada cerca del agujero, seguía siendo un cambio *duro* de un
+       tracer a otro — y el borde de ese cambio, donde antes había sido una
+       cuña del tamaño de toda la pantalla, ahora era un doble cono visible
+       alrededor de la sombra, con la misma causa raíz (Schwarzschild y Kerr
+       no coinciden píxel a píxel en qué parte del cielo debería verse).
+       Primer intento de fix: en vez de un salto duro, difuminar (mezclar
+       colores) entre ambos tracers en una banda alrededor del umbral de
+       cambio. Diagnosticado con más color-coding (esta vez comparando el
+       ángulo θ final de cada tracer directamente, no solo el color): en el
+       borde de esa banda ambos tracers predicen θ finales que difieren en
+       decenas de grados, no en ruido de punto flotante — ninguna cantidad de
+       difuminado de color puede ocultar un desacuerdo de esa magnitud, solo
+       lo vuelve menos abrupto visualmente.
+     - Fix definitivo: se eliminó el fallback por completo. Se verificó
+       (forzando temporalmente todo rayo con spin/carga a pasar solo por
+       `traceKerr`, sin ningún fallback) que el integrador completo, con el
+       sampleo directo de UV desde (θ,φ) y el reflejo `POLE_GUARD` ya
+       existentes, es números lo bastante estable cerca del eje por sí solo
+       — el fallback estaba resolviendo un problema (la inestabilidad cerca
+       del polo) que un fix anterior ya había resuelto, y solo introducía uno
+       nuevo. Verificado en el navegador reproduciendo exactamente el
+       escenario reportado (masa=0.75, spin=1.00, cámara en ángulo
+       pronunciado): sin conos, sin cuña, sin línea brillante. Quedó un
+       rastro tenue (una línea punteada subiendo por el eje) que en su
+       momento se atribuyó tentativamente a imágenes fantasma de orden
+       superior genuinas sin investigar más — pero una review posterior
+       mostró que seguía siendo bastante visible ("seguimos teniendo los
+       jets"), así que se investigó a fondo en vez de darlo por aceptable.
+     - Causa real de ese rastro punteado (encontrada agregando un switch en
+       el sidebar para ocultar el disco de acreción durante el testing,
+       pedido explícito del usuario — ver `showDisk` en el store — porque el
+       disco tapaba justo la zona del eje donde aparecía el artefacto):
+       primero se probó si era un problema de precisión numérica (subir
+       `MAX_STEPS_KERR`/bajar `D_TAU` varias veces), y el patrón no cambió en
+       absoluto — descartando error de integración como causa. La causa real
+       era conceptual: el bloque `POLE_GUARD` trata *cualquier* cruce cercano
+       al polo como un rebote (refleja θ, invierte w_θ), asumiendo que
+       siempre hay un punto de retorno real ahí (Θ(θ)=0) que el paso de RK4
+       simplemente overshooteó. Eso es cierto para un rayo con L≠0 — pero un
+       rayo con L≈0 (el plano vertical que contiene cámara y eje de spin) NO
+       tiene punto de retorno en absoluto: Θ(θ) = Q + a²cos²θ es ≥0 para
+       todo θ, así que ese rayo genuinamente **pasa por encima del polo**
+       hacia el otro lado del cielo (φ → φ+π), igual que caminar en línea
+       recta sobre el polo norte de un globo terráqueo te deja 180° del otro
+       lado en longitud. Tratar ese cruce como un rebote atrapa el rayo
+       rebotando artificialmente entre ambos polos varias veces antes de
+       escapar, y cada rebote espurio muestrea casi la misma franja de
+       cielo — de ahí la línea punteada (cada punto es una repetición de la
+       misma imagen). Fix: antes de aplicar el rebote, se evalúa Θ(θ) en la
+       latitud de guarda (`thetaNearPole`, calculado una sola vez por rayo ya
+       que L/Q/a no cambian) — si da claramente positivo (sin punto de
+       retorno real cerca), es un cruce genuino y se suma π a φ además de
+       reflejar θ; si da ~0 (retorno real), se deja el rebote sin más como
+       antes. Aplicado en `kerrLensing.ts` (con el test de vitest ya
+       existente verificando finitud cerca del polo) y su espejo en
+       `LensedBackground.tsx`.
+     - Con el fix, la línea punteada dejó de extenderse por todo el cuadro
+       (arriba y abajo de la sombra, incluso lejos del agujero, algo que
+       nunca tuvo sentido físico para rayos casi sin deflectar) y quedó
+       confinada a un tramo corto justo junto a la sombra — consistente
+       ahora sí con ecos genuinos del anillo de fotones (el mismo fenómeno
+       real que produce anillos de Einstein de orden superior en el plano
+       ecuatorial, aquí visto sobre el eje). En el uso normal el disco de
+       acreción tapa esa zona por completo. No se investigó más allá de este
+       punto.
+     - Aun así, en la siguiente review el usuario reportó que las líneas
+       seguían ahí ("realmente no sé qué podemos hacer con esas líneas") y,
+       además, unas líneas concéntricas alrededor de la sombra con forma de
+       "escalera" (bloques dentados, no una curva lisa) — junto con el
+       navegador visiblemente forzado en recursos. Estas resultaron ser DOS
+       causas nuevas y separadas, ninguna relacionada con la física del
+       integrador:
+       - El `shaderMaterial` de `LensedBackground` nunca declaraba
+         `precision`, dejando que three.js eligiera automáticamente (según
+         soporte detectado del driver/GPU) entre `highp`/`mediump`/`lowp`.
+         En `mediump` (≈10 bits de mantisa), acumular ~2200 pasos de RK4
+         por píxel pierde precisión progresivamente, y esa pérdida se
+         manifiesta como bandas/escalones discretos — exactamente las
+         líneas concéntricas dentadas reportadas. Fix: `precision="highp"`
+         explícito en el `shaderMaterial`. No se descartó por rendimiento;
+         de hecho, forzar precisión explícita evita que el driver GPU
+         re-evalúe/cambie de precisión en tiempo de ejecución, lo cual
+         también puede aliviar el uso de recursos reportado.
+       - Aun con `highp`, quedaba un anillo de arcos finos y lisos (sin
+         dentado) exactamente donde está la mancha de galaxia de fondo —
+         estos SÍ son reales, pero de otra causa: la lente gravitacional
+         amplifica el ángulo sólido sin límite cerca de la esfera de
+         fotones (en el límite, un anillo entero del cielo colapsa a un
+         punto), así que los escalones de 8 bits del gradiente radial de la
+         mancha (`createRadialGradient`, sobre un canvas de 2048×1024)
+         eventualmente se vuelven visibles al ser magnificados lo
+         suficiente — eran invisibles a resolución normal, pero la lente
+         los estira hasta hacerlos notorios. Mitigado duplicando la
+         resolución de la textura (4096×2048 en `LensedBackground.tsx`),
+         lo que empuja el radio en que esto se vuelve visible hacia afuera,
+         aunque no elimina el límite de fondo (una textura rasterizada de
+         resolución finita bajo magnificación no acotada) — ese trade-off
+         de fidelidad vs. rendimiento es justamente lo que los controles de
+         calidad del roadmap (ítem 7) deberían exponer como ajustable.
+       - Verificado en el navegador reproduciendo el escenario exacto de la
+         review (masa=0.75, spin=1.00, disco oculto vía el nuevo switch):
+         sin líneas dentadas, sin arcos visibles, sin línea punteada en el
+         eje en este encuadre.
+   - Segundo bug, más serio, encontrado en review: con masa baja (slider cerca
+     del mínimo) y spin alto, el fondo entero colapsaba a un solo color sólido.
+     Causa: `uMaxRadius` (el umbral de "el rayo escapó" del integrador) se
+     calculaba como `300 * mass`, pero la cámara está a una distancia FIJA
+     (~122 unidades, hardcodeada en `BlackHoleCanvas` y no reactiva a la masa)
+     — a masa=0.3, `uMaxRadius=90 < 122`. La cámara arrancaba entonces más allá
+     del propio umbral de escape del integrador: cada rayo cumplía "escapé"
+     casi en el primer paso, con θ/φ prácticamente sin cambios respecto al
+     valor inicial (que es el mismo para todos los píxeles, ya que solo
+     depende de la posición de la cámara) — es decir, toda la pantalla
+     terminaba sampleando el mismo píxel de la textura. Fix: `uMaxRadius` es
+     ahora una constante fija (`MAX_RAY_RADIUS = 400` en `LensedBackground.tsx`),
+     desacoplada de la masa, siempre mayor a la distancia real de cámara.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
    fidelidad vs. rendimiento en GPUs modestas.
+8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
+   separada del shader de lente — no pasa por el raytracer, así que no se deforma
+   ni aparece duplicado arriba/abajo del agujero (el look clásico de la foto de
+   M87/Sgr A*, o de Interstellar). Para lograrlo hace falta que el mismo rayo
+   curvado del shader detecte cuándo cruza el plano del disco (z=0 en coordenadas
+   del disco, entre `innerRadius` y `outerRadius`) durante la integración, y
+   samplee el color/temperatura del disco ahí en vez de (o además de) la textura
+   de fondo — probablemente usando un mapa de temperatura precalculado en vez de
+   volver a generar 8000 partículas dentro del shader. Pedido explícito del
+   usuario tras revisar el PR 6 (el disco "queda mediocre" al no deformarse con
+   el resto de la imagen).
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

@@ -4,8 +4,28 @@ import * as THREE from 'three'
 import type { BlackHoleParams } from '../../physics/metric'
 
 const SPHERE_RADIUS = 500
-const TEXTURE_WIDTH = 2048
-const TEXTURE_HEIGHT = 1024
+// The "ray has escaped" threshold for the lensing integrators. This has to
+// stay comfortably larger than the camera's actual distance from the black
+// hole (fixed by BlackHoleCanvas's hardcoded camera position, ~122 units —
+// it does NOT scale with mass) and smaller than SPHERE_RADIUS. It used to
+// scale with mass (300 * mass), which put it *below* the camera distance
+// at low mass (e.g. 90 at mass=0.3) — every ray then satisfied "escaped"
+// after essentially zero integration, at close to the same starting
+// theta/phi for every pixel regardless of screen position, collapsing the
+// entire lensed background to a single sampled texture color.
+const MAX_RAY_RADIUS = 400
+// 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
+// angle without bound near the photon sphere (in the limit, a full ring of
+// sky maps to a single point), so any raster texture's 8-bit gradient steps
+// (the galaxy smudge's radial gradient, in particular) eventually become
+// visible as concentric bands once magnified enough — found via visual QA
+// as a set of thin arcs near the shadow. Doubling resolution pushes the
+// radius at which that becomes visible outward; it doesn't eliminate the
+// underlying limit (a finite-resolution texture under unbounded
+// magnification), which is the kind of fidelity/performance trade-off
+// roadmap item 7's quality controls are meant to make tunable.
+const TEXTURE_WIDTH = 4096
+const TEXTURE_HEIGHT = 2048
 const STAR_COUNT = 3000
 
 function generateGalaxyBackgroundTexture(): THREE.Texture {
@@ -156,7 +176,34 @@ const FRAGMENT_SHADER = /* glsl */ `
     return normalize(e1Comp * e1 + e2Comp * e2);
   }
 
-  vec3 traceKerr(vec3 ro, vec3 rd, out bool captured) {
+  // Θ(θ) and its derivative divide by sin²θ/sin³θ, which blow up as a ray's
+  // θ approaches the poles (looking straight along the spin axis) — for a
+  // genuine photon orbit with L≠0 this never actually happens (Θ would go
+  // negative first, forcing a turning point well before the pole), but
+  // floating-point roundoff right at that boundary can still send a stray
+  // ray through the singularity, producing a visible bright line straight
+  // up/down the spin axis. Clamping keeps every real trajectory unaffected
+  // (they never get this close to sin θ = 0) while killing the artifact.
+  float safeSin(float theta) {
+    float s = sin(theta);
+    return s >= 0.0 ? max(s, 1e-3) : min(s, -1e-3);
+  }
+
+  // Returns the equirectangular UV to sample directly from (theta, phi),
+  // rather than reconstructing a Cartesian direction and re-deriving UV
+  // from it via atan2/acos. That round trip is where the pole artifact
+  // actually came from: for a ray whose bent path swings close to the spin
+  // axis, sin(theta) shrinks toward zero, so its Cartesian x/z components
+  // (built from sinTheta*cos(phi)/sinTheta*sin(phi)) become vanishingly
+  // small — and re-extracting phi from atan2 of two near-zero floats is
+  // exactly where floating-point noise blows up into a visible seam
+  // (confirmed by feeding finalDir straight to the framebuffer as a color:
+  // the seam showed up as a literal discontinuity in the direction vector
+  // itself, not in capture/escape or in the texture lookup). Sampling
+  // straight from the already-smooth, already-accumulated phi sidesteps
+  // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
+  // handles phi being outside [-π, π] for free.
+  vec2 traceKerr(vec3 ro, vec3 rd, out bool captured) {
     float M = uMass;
     float a = uSpin;
     float e2 = uCharge * uCharge;
@@ -189,7 +236,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     float Delta0 = r0 * r0 - 2.0 * M * r0 + a * a + e2;
     float R0 = P0 * P0 - Delta0 * ((L - a) * (L - a) + Q);
     float c0 = cos(theta0);
-    float s0 = sin(theta0);
+    float s0 = safeSin(theta0);
     float Th0 = Q + c0 * c0 * (a * a - L * L / (s0 * s0));
 
     float wr = sign(rdRadial) * sqrt(max(0.0, R0));
@@ -197,12 +244,26 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     bool escaped = false;
 
+    // Whether this ray has a real Θ(θ) turning point near the pole (a true
+    // bounce) or genuinely has none (L≈0, Θ = Q + a²cos²θ stays ≥ 0 all the
+    // way to the axis, so the ray passes over the pole into the opposite
+    // half of the sky, φ → φ + π) — see the matching comment in
+    // kerrLensing.ts's traceKerrRay for the full derivation and the visual
+    // artifact (a faint periodic chain of duplicate star images up the
+    // spin axis) this distinction fixes. Ray-invariant, so computed once
+    // outside the step loop.
+    const float POLE_GUARD = 0.02;
+    float sinGuard = sin(POLE_GUARD);
+    float cosGuard = cos(POLE_GUARD);
+    float thetaNearPole = Q + cosGuard * cosGuard * (a * a - L * L / (sinGuard * sinGuard));
+    bool isPoleCrossing = thetaNearPole > 0.0;
+
     for (int i = 0; i < MAX_STEPS_KERR; i++) {
       // derivatives(r, theta, wr, wth) -> (dr, dth, dphi, dwr, dwth), inlined
       // four times for the RK4 stages.
       float k1r = wr;
       float k1th = wth;
-      float s1 = sin(theta); float s12 = s1 * s1; float c1 = cos(theta);
+      float s1 = safeSin(theta); float s12 = s1 * s1; float c1 = cos(theta);
       float Delta1 = r * r - 2.0 * M * r + a * a + e2;
       float P1 = r * r + a * a - a * L;
       float RmL1 = (L - a) * (L - a) + Q;
@@ -216,7 +277,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth2 = wth + (D_TAU * 0.5) * k1dwth;
       float k2r = wr2;
       float k2th = wth2;
-      float s2_ = sin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
+      float s2_ = safeSin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
       float Delta2 = r2 * r2 - 2.0 * M * r2 + a * a + e2;
       float P2 = r2 * r2 + a * a - a * L;
       float RmL2 = (L - a) * (L - a) + Q;
@@ -230,7 +291,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth3 = wth + (D_TAU * 0.5) * k2dwth;
       float k3r = wr3;
       float k3th = wth3;
-      float s3_ = sin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
+      float s3_ = safeSin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
       float Delta3 = r3 * r3 - 2.0 * M * r3 + a * a + e2;
       float P3 = r3 * r3 + a * a - a * L;
       float RmL3 = (L - a) * (L - a) + Q;
@@ -244,7 +305,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       float wth4 = wth + D_TAU * k3dwth;
       float k4r = wr4;
       float k4th = wth4;
-      float s4_ = sin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
+      float s4_ = safeSin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
       float Delta4 = r4 * r4 - 2.0 * M * r4 + a * a + e2;
       float P4 = r4 * r4 + a * a - a * L;
       float RmL4 = (L - a) * (L - a) + Q;
@@ -258,37 +319,101 @@ const FRAGMENT_SHADER = /* glsl */ `
       wr += (D_TAU / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
       wth += (D_TAU / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
 
-      if (r < uHorizonRadius || !(r == r)) { captured = true; return rd; }
+      // A real photon orbit with L≠0 turns around before ever reaching the
+      // pole (Θ(θ) hits zero first) — but a single RK4 step can overshoot
+      // past that turning point numerically near the singularity. Reflect
+      // theta/wth like a wall there instead of letting the ray punch
+      // through, which otherwise shows up as a bright seam along the spin
+      // axis. When there's no real turning point nearby (isPoleCrossing,
+      // computed once above), the ray is genuinely passing over the pole
+      // into the opposite half of the sky, so φ picks up an extra π.
+      if (theta < POLE_GUARD) {
+        theta = 2.0 * POLE_GUARD - theta; wth = -wth;
+        if (isPoleCrossing) phi += PI;
+      }
+      if (theta > PI - POLE_GUARD) {
+        theta = 2.0 * (PI - POLE_GUARD) - theta; wth = -wth;
+        if (isPoleCrossing) phi += PI;
+      }
+
+      if (r < uHorizonRadius || !(r == r)) { captured = true; return vec2(0.0); }
       if (r > uMaxRadius) { escaped = true; break; }
     }
 
-    if (!escaped) { captured = true; return rd; }
+    if (!escaped) { captured = true; return vec2(0.0); }
 
     captured = false;
-    float sinThetaFinal = sin(theta);
-    vec3 finalDir = normalize(
-      xRef * (sinThetaFinal * cos(phi)) + yRef * (sinThetaFinal * sin(phi)) + SPIN_AXIS * cos(theta)
-    );
-    return finalDir;
+    return vec2(phi / (2.0 * PI) + 0.5, clamp(theta, 0.0, PI) / PI);
+  }
+
+  // Samples the background for a ray handled by the pure-mass Schwarzschild
+  // tracer — used only when there's no spin or charge at all (a > 0 or
+  // e > 0 always goes through kerrColor below, everywhere on the sky,
+  // including near the poles; see that function's comment for why).
+  vec3 schwarzschildColor(vec3 ro, vec3 rd, out bool captured) {
+    vec3 finalDir = traceSchwarzschild(ro, rd, captured);
+    if (captured) return vec3(0.0);
+    return texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
+  }
+
+  // Samples the background for a ray handled by the full Kerr–Newman
+  // tracer, including the poleFade treatment for the background texture's
+  // own (unrelated) pole degeneracy below.
+  //
+  // An earlier version of this file routed rays whose trajectory swings
+  // close to the spin axis to the Schwarzschild tracer instead, reasoning
+  // that frame dragging vanishes on-axis so ignoring spin there is a safe
+  // approximation, precisely where the Kerr integrator's Θ(θ) (with its
+  // 1/sin³θ terms) was assumed least reliable. That fallback was itself the
+  // bug, not the fix: the two tracers generally land on a *different* final
+  // (θ,φ) for the same ray (frame dragging is small near the axis, but not
+  // exactly zero off it, and the two integrators don't otherwise agree
+  // pixel-for-pixel), so wherever the switch condition crossed there was a
+  // visible seam between two differently-sampled patches of sky. Tried as a
+  // hard switch, this showed up as a wedge spanning the whole frame (fixed
+  // by also requiring a small impact parameter — see git history); tried
+  // again as a smoothly-feathered blend confined close to the hole, it
+  // still showed up as a pair of dark "hourglass cones" reaching out from
+  // the poles, because the two tracers' predicted sky directions disagree
+  // by tens of degrees right at the boundary, not by noise-level amounts —
+  // no amount of feathering hides a disagreement that large. Verified (by
+  // temporarily forcing every spinning/charged ray through this function
+  // alone, no fallback at all) that the direct-UV-sampling fix and the
+  // POLE_GUARD reflection inside traceKerr, on their own, are already
+  // numerically stable enough near the axis — the fallback was solving a
+  // problem that a previous fix had already solved, and only introducing a
+  // new one.
+  vec3 kerrColor(vec3 ro, vec3 rd, out bool captured) {
+    vec2 uv = traceKerr(ro, rd, captured);
+    if (captured) return vec3(0.0);
+
+    // An equirectangular texture is mathematically degenerate exactly at
+    // its poles (every u maps to the same physical point when v is 0 or 1),
+    // and rays whose bent path swings close to the spin axis land right in
+    // that degenerate strip — any leftover floating-point noise in exactly
+    // which u they land on reads as a bright seam, and it's most visible
+    // wherever it happens to cross a bright part of the texture (a star
+    // field pixel doesn't show it; the lensed galaxy glow does). Rather
+    // than chase that noise further inside the delicate RK4 integration,
+    // fade the sample to black right at the poles — a sliver of solid
+    // angle nobody would notice missing, in exchange for never showing the
+    // seam at all.
+    float sinThetaFinal = sin(uv.y * PI);
+    float poleFade = smoothstep(0.0, 0.08, sinThetaFinal);
+    return texture2D(uBackgroundTexture, uv).rgb * poleFade;
   }
 
   void main() {
     vec3 rd = normalize(vWorldPos - uCameraPos);
-    bool captured = false;
-    vec3 finalDir;
 
     if (uSpin < 1e-4 && uCharge < 1e-4) {
-      finalDir = traceSchwarzschild(uCameraPos, rd, captured);
-    } else {
-      finalDir = traceKerr(uCameraPos, rd, captured);
-    }
-
-    if (captured) {
-      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      bool captured = false;
+      gl_FragColor = vec4(schwarzschildColor(uCameraPos, rd, captured), 1.0);
       return;
     }
 
-    gl_FragColor = texture2D(uBackgroundTexture, equirectUv(finalDir));
+    bool captured = false;
+    gl_FragColor = vec4(kerrColor(uCameraPos, rd, captured), 1.0);
   }
 `
 
@@ -316,7 +441,7 @@ export function LensedBackground({
       uSpin: { value: params.spin },
       uCharge: { value: params.charge },
       uHorizonRadius: { value: horizonRadius },
-      uMaxRadius: { value: 100 * params.mass },
+      uMaxRadius: { value: MAX_RAY_RADIUS },
     }),
     [texture, params.mass, params.spin, params.charge, horizonRadius],
   )
@@ -329,7 +454,7 @@ export function LensedBackground({
     material.uniforms.uSpin.value = params.spin
     material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
-    material.uniforms.uMaxRadius.value = 100 * params.mass
+    material.uniforms.uMaxRadius.value = MAX_RAY_RADIUS
   })
 
   return (
@@ -342,6 +467,7 @@ export function LensedBackground({
         fragmentShader={FRAGMENT_SHADER}
         side={THREE.BackSide}
         depthWrite={false}
+        precision="highp"
       />
     </mesh>
   )

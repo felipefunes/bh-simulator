@@ -13,9 +13,11 @@ export function Sidebar() {
   const mass = useBlackHoleStore((state) => state.mass)
   const spinRatio = useBlackHoleStore((state) => state.spinRatio)
   const chargeRatio = useBlackHoleStore((state) => state.chargeRatio)
+  const showDisk = useBlackHoleStore((state) => state.showDisk)
   const setMass = useBlackHoleStore((state) => state.setMass)
   const setSpinRatio = useBlackHoleStore((state) => state.setSpinRatio)
   const setChargeRatio = useBlackHoleStore((state) => state.setChargeRatio)
+  const setShowDisk = useBlackHoleStore((state) => state.setShowDisk)
 
   const params = useBlackHoleParams()
   const naked = isNakedSingularity(params)
@@ -78,10 +80,20 @@ export function Sidebar() {
         />
       </label>
 
+      <label className="sidebar__control sidebar__control--checkbox">
+        <input type="checkbox" checked={showDisk} onChange={(event) => setShowDisk(event.target.checked)} />
+        <span className="sidebar__control-label">Mostrar disco de acreción</span>
+      </label>
+
       <p className="sidebar__note">
-        El disco de acreción con temperatura física (beaming Doppler, corrimiento al
-        rojo gravitacional) y la lente gravitacional sobre una imagen de fondo se
-        agregan en próximos PRs.
+        La rotación del disco se muestra acelerada (×15) para que se note a esta
+        escala visual — la velocidad orbital real es Kepleriana correcta, pero
+        del orden de minutos por vuelta incluso en el borde interno.
+      </p>
+
+      <p className="sidebar__note">
+        Controles de calidad (balance entre fidelidad del shader y rendimiento en
+        GPUs modestas) se agregan en un próximo PR.
       </p>
     </aside>
   )

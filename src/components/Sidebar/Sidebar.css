@@ -61,6 +61,21 @@
   accent-color: var(--color-accent);
 }
 
+.sidebar__control--checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.sidebar__control--checkbox input[type='checkbox'] {
+  accent-color: var(--color-accent);
+}
+
+.sidebar__control--checkbox .sidebar__control-label {
+  margin-bottom: 0;
+}
+
 .sidebar__note {
   margin: 16px 0 0;
   font-size: 0.8rem;
