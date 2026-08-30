@@ -334,8 +334,37 @@ clasificación del caso) de forma aislada del render.
      terminaba sampleando el mismo píxel de la textura. Fix: `uMaxRadius` es
      ahora una constante fija (`MAX_RAY_RADIUS = 400` en `LensedBackground.tsx`),
      desacoplada de la masa, siempre mayor a la distancia real de cámara.
-7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
-   fidelidad vs. rendimiento en GPUs modestas.
+7. ✅ **Controles de calidad**: selector Baja/Media/Alta en el sidebar
+   (`renderQuality.ts` + `useBlackHoleStore.quality`), motivado directamente por
+   el review del PR 6 (recursos del navegador "a tope" con spin alto). Dos
+   palancas, ambas ya existentes en el shader/Canvas, ahora parametrizadas:
+   - **Pasos del integrador**: los `const int`/`const float` fijos del
+     fragment shader (`MAX_STEPS_KERR`, `D_TAU`, `MAX_STEPS_SCHW`, `D_PHI`)
+     pasan a ser uniforms (`uKerrSteps`/`uKerrDTau`/`uSchwSteps`/`uSchwDPhi`).
+     GLSL ES 1.00 exige que el límite de un `for` sea una constante de
+     compilación, así que los loops mantienen un cap fijo alto
+     (`MAX_STEPS_KERR_CAP`/`MAX_STEPS_SCHW_CAP`, cómodamente por encima del
+     preset "Alta") y cortan antes con `if (i >= uKerrSteps) break;` — el cap
+     nunca cambia, sólo cuántas iteraciones corren antes del corte. Steps y
+     tamaño de paso se escalan inversamente para que su producto (el rango
+     total integrado — tiempo de Mino para Kerr, φ para Schwarzschild) se
+     mantenga igual entre niveles: "Baja" da pasos más grandes y menos
+     numerosos sobre el mismo recorrido, no corta la integración a mitad de
+     camino (eso cambiaría a dónde llega el rayo, no sólo cuán preciso es el
+     camino). "Media" reproduce exactamente las constantes originales
+     pre-PR7, así que el render default no cambia. Invariante (steps ×
+     stepSize constante entre niveles) verificado con vitest en
+     `renderQuality.test.ts`.
+   - **Pixel ratio del Canvas**: `pixelRatioForQuality()` capa el
+     `devicePixelRatio` real (nunca lo sobrepasa) — 1× en "Baja", 1.5× en
+     "Media", 2× en "Alta" — pasado directo al prop `dpr` de `<Canvas>` en
+     `BlackHoleCanvas`. El costo del fragment shader escala con la cantidad
+     de píxeles, así que esta es la otra palanca de rendimiento real.
+   - Verificado visualmente: "Baja" con spin=1.00 muestra bandas de
+     discretización visibles alrededor del resplandor de la galaxia (el
+     trade-off es honesto, no gratis) mientras que "Alta" se ve tan limpio
+     como (o mejor que) el default anterior — confirma que el control tiene
+     efecto real, no es un placeholder.
 8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
    separada del shader de lente — no pasa por el raytracer, así que no se deforma
    ni aparece duplicado arriba/abajo del agujero (el look clásico de la foto de

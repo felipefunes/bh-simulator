@@ -76,6 +76,34 @@
   margin-bottom: 0;
 }
 
+.sidebar__quality-group {
+  display: flex;
+  gap: 6px;
+}
+
+.sidebar__quality-button {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.sidebar__quality-button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.sidebar__quality-button--active {
+  background: rgba(255, 179, 122, 0.12);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
 .sidebar__note {
   margin: 16px 0 0;
   font-size: 0.8rem;

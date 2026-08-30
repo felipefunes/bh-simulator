@@ -2,6 +2,7 @@ import { OrbitControls } from '@react-three/drei'
 import { Canvas } from '@react-three/fiber'
 import { horizonRadii } from '../../physics/metric'
 import { iscoRadius } from '../../physics/orbits'
+import { pixelRatioForQuality } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
 import { AccretionDisk } from './AccretionDisk'
 import { LensedBackground } from './LensedBackground'
@@ -14,7 +15,9 @@ const DISK_OUTER_TO_INNER_RATIO = 10
 export function BlackHoleCanvas() {
   const params = useBlackHoleParams()
   const showDisk = useBlackHoleStore((state) => state.showDisk)
+  const quality = useBlackHoleStore((state) => state.quality)
   const horizons = horizonRadii(params)
+  const dpr = pixelRatioForQuality(quality, window.devicePixelRatio)
 
   // iscoRadius is only a closed form for Schwarzschild/Kerr (charge = 0, see
   // physics/orbits.ts); Reissner-Nordström/Kerr-Newman fall back to an
@@ -28,8 +31,8 @@ export function BlackHoleCanvas() {
   // to draw. For a naked singularity (horizons === null) it just never
   // captures light — see LensedBackground/physics/lensing.ts.
   return (
-    <Canvas camera={{ position: [0, 51, 111], fov: 50 }}>
-      <LensedBackground params={params} horizonRadius={horizons?.outer ?? 1e-6} />
+    <Canvas camera={{ position: [0, 51, 111], fov: 50 }} dpr={dpr}>
+      <LensedBackground params={params} horizonRadius={horizons?.outer ?? 1e-6} quality={quality} />
       <ambientLight intensity={0.15} />
       {showDisk && (
         <AccretionDisk
