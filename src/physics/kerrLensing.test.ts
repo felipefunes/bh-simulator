@@ -1,0 +1,157 @@
+import { describe, expect, it } from 'vitest'
+import { photonSphereRadius } from './orbits'
+import { traceKerrRay } from './kerrLensing'
+import { traceSchwarzschildRay } from './lensing'
+
+const mass = 1
+const spinAxis = [0, 1, 0] as const
+
+/** Equatorial camera position + inward ray direction with impact parameter b. */
+function equatorialInwardRay(r0: number, b: number) {
+  const sinPsi = Math.abs(b) / r0
+  const cosPsi = Math.sqrt(1 - sinPsi * sinPsi)
+  const cameraPos = [r0, 0, 0] as const
+  // Sign of b picks which tangential sense (prograde/retrograde relative to
+  // +spinAxis) the ray heads in — see traceKerrRay's L = impactVec·spinAxis.
+  const rayDir = [-cosPsi, 0, Math.sign(b) * sinPsi] as const
+  return { cameraPos, rayDir }
+}
+
+/**
+ * Exact critical impact parameter for an equatorial Kerr photon orbit, from
+ * the double-root condition R(r_ph) = R'(r_ph) = 0, solved for L in terms of
+ * the (already independently-derived and tested) photon sphere radius.
+ */
+function criticalImpactParameter(a: number, rph: number, charge = 0) {
+  const Delta = rph * rph - 2 * mass * rph + a * a + charge * charge
+  const P = (2 * rph * Delta) / (rph - mass)
+  return (rph * rph + a * a - P) / a
+}
+
+/**
+ * Same double-root condition, specialized to a=0 (Reissner–Nordström),
+ * where criticalImpactParameter's /a blows up — solved directly instead:
+ * R'(r_ph)=0 gives L² = 2r_ph³/(r_ph−M), independent of the sign convention
+ * criticalImpactParameter uses (RN has no prograde/retrograde distinction).
+ */
+function criticalImpactParameterRN(rph: number) {
+  return Math.sqrt((2 * rph ** 3) / (rph - mass))
+}
+
+describe('traceKerrRay', () => {
+  it('reduces to the Schwarzschild tracer at spin = 0 (away from the critical impact parameter)', () => {
+    const horizonRadius = 2 * mass
+    const r0 = 60
+
+    for (const b of [1, 2, 3, 4, 6, 10, 50]) {
+      const { cameraPos, rayDir } = equatorialInwardRay(r0, b)
+      const kerr = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 300,
+      })
+
+      const sinPsi = b / r0
+      const cosPsi = Math.sqrt(1 - sinPsi * sinPsi)
+      const schwarzschild = traceSchwarzschildRay({ mass, horizonRadius }, r0, -cosPsi, sinPsi, {
+        maxSteps: 2000,
+        dPhi: 0.01,
+        maxRadius: 300,
+      })
+
+      expect(kerr.captured).toBe(schwarzschild.captured)
+    }
+  })
+
+  it('matches the exact equatorial critical impact parameter for a spinning hole', () => {
+    const a = 0.9
+    const horizonRadius = mass + Math.sqrt(mass * mass - a * a)
+    const r0 = 60
+
+    for (const direction of ['prograde', 'retrograde'] as const) {
+      const rph = photonSphereRadius({ mass, spin: a, charge: 0 }, direction)!
+      // equatorialInwardRay(r0, x) produces L = -x (built from -cosPsi,
+      // sign(x)*sinPsi), so the ray with L = criticalImpactParameter(...)
+      // needs the negated value passed in as its "b".
+      const bCrit = -criticalImpactParameter(a, rph)
+
+      const inside = equatorialInwardRay(r0, bCrit * 0.7)
+      const outside = equatorialInwardRay(r0, bCrit * 1.3)
+
+      const insideResult = traceKerrRay({ mass, spin: a, horizonRadius }, inside.cameraPos, inside.rayDir, spinAxis, {
+        maxSteps: 40000,
+        dTau: 0.0003,
+        maxRadius: 500,
+      })
+      const outsideResult = traceKerrRay(
+        { mass, spin: a, horizonRadius },
+        outside.cameraPos,
+        outside.rayDir,
+        spinAxis,
+        { maxSteps: 40000, dTau: 0.0003, maxRadius: 500 },
+      )
+
+      expect(insideResult.captured).toBe(true)
+      expect(outsideResult.captured).toBe(false)
+    }
+  })
+
+  it('matches the exact equatorial critical impact parameter for a charged, non-spinning hole (Reissner-Nordström)', () => {
+    const charge = 0.6
+    const horizonRadius = mass + Math.sqrt(mass * mass - charge * charge)
+    const r0 = 60
+
+    const rph = photonSphereRadius({ mass, spin: 0, charge })!
+    const bCrit = criticalImpactParameterRN(rph)
+
+    const inside = equatorialInwardRay(r0, bCrit * 0.7)
+    const outside = equatorialInwardRay(r0, bCrit * 1.3)
+
+    const insideResult = traceKerrRay(
+      { mass, spin: 0, charge, horizonRadius },
+      inside.cameraPos,
+      inside.rayDir,
+      spinAxis,
+      { maxSteps: 40000, dTau: 0.0003, maxRadius: 500 },
+    )
+    const outsideResult = traceKerrRay(
+      { mass, spin: 0, charge, horizonRadius },
+      outside.cameraPos,
+      outside.rayDir,
+      spinAxis,
+      { maxSteps: 40000, dTau: 0.0003, maxRadius: 500 },
+    )
+
+    expect(insideResult.captured).toBe(true)
+    expect(outsideResult.captured).toBe(false)
+  })
+
+  it('shows the frame-dragging asymmetry: the same |b| can be captured prograde but escape retrograde', () => {
+    const a = 0.99
+    const horizonRadius = mass + Math.sqrt(mass * mass - a * a)
+    const r0 = 60
+    const b = 4.5 // between the prograde (~2.8M) and retrograde (~6.8M) critical values at a=0.99
+
+    // equatorialInwardRay(r0, x) produces L = -x, and positive L is
+    // prograde (same convention as criticalImpactParameter above) — so
+    // "prograde with impact parameter b" is equatorialInwardRay(r0, -b).
+    const prograde = equatorialInwardRay(r0, -b)
+    const retrograde = equatorialInwardRay(r0, b)
+
+    const progradeResult = traceKerrRay({ mass, spin: a, horizonRadius }, prograde.cameraPos, prograde.rayDir, spinAxis, {
+      maxSteps: 40000,
+      dTau: 0.0003,
+      maxRadius: 500,
+    })
+    const retrogradeResult = traceKerrRay(
+      { mass, spin: a, horizonRadius },
+      retrograde.cameraPos,
+      retrograde.rayDir,
+      spinAxis,
+      { maxSteps: 40000, dTau: 0.0003, maxRadius: 500 },
+    )
+
+    expect(progradeResult.captured).toBe(false)
+    expect(retrogradeResult.captured).toBe(true)
+  })
+})

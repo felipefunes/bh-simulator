@@ -111,10 +111,32 @@ clasificación del caso) de forma aislada del render.
    traducción fiel de esa función ya verificada. El disco de acreción sigue siendo
    geometría de partículas normal (no lensed) por ahora; lensear el disco en sí queda
    para cuando se trabaje el PR 6.
-5. Extender el shader a Kerr/Kerr–Newman (frame dragging, ergosfera) — aproximación
-   numérica del término de spin en el integrador.
-5. Extender el shader a Kerr/Kerr–Newman (frame dragging, ergosfera) — aproximación
-   numérica del término de spin en el integrador.
+5. ✅ **Kerr–Newman en el shader**: se optó por el tratamiento riguroso (geodésicas
+   exactas vía la constante de Carter), no una aproximación — ver `src/physics/kerrLensing.ts`
+   (`traceKerrRay`). En Kerr, las órbitas no son planas en general (frame dragging saca
+   al fotón del plano inicial), así que hace falta el sistema completo (r, θ, φ) con la
+   separación de Hamilton-Jacobi de Carter, integrado en "tiempo de Mino" (dτ = dλ/Σ,
+   Mino 2003) sobre (r, θ, φ, w_r ≡ Σṙ, w_θ ≡ Σθ̇) — este truco de trackear w_r/w_θ en
+   vez de r/θ directamente evita el signo ± que normalmente hay que flippear en cada
+   punto de retorno, algo incómodo para RK4. La carga eléctrica solo modifica Δ (que
+   pasa a ser r² − 2Mr + a² + e²) y no su derivada, así que extender de Kerr a
+   Kerr–Newman fue un cambio mínimo sobre el mismo integrador.
+   - Verificado contra: el caso a=0 reproduciendo `traceSchwarzschildRay` (fuera del
+     parámetro de impacto crítico), el parámetro de impacto crítico exacto (prógrado,
+     retrógado, y Reissner–Nordström) derivado de `photonSphereRadius` ya testeada, y
+     la asimetría de frame dragging (mismo |b|, resultado distinto prógrado vs. retrógrado).
+   - Durante el desarrollo, la condición inicial `w_r(0)` aproximada (con la fórmula de
+     campo plano) causaba que un rayo se "rebotara" en el radio equivocado — el error
+     era invisible lejos del agujero pero catastrófico cerca de la esfera de fotones.
+     El fix fue sembrar `w_r(0)`/`w_θ(0)` exactos desde R(r₀)/Θ(θ₀), no la aproximación.
+   - Costo conocido: la integración completa necesita muchos más pasos que el caso
+     Schwarzschild (miles vs. cientos), así que el shader usa una rama barata
+     (Schwarzschild puro) cuando spin y carga son ~0, y solo paga el costo completo
+     cuando alguno de los dos es no nulo. El ajuste fino de performance (pasos/paso de
+     integración) queda para el PR 7.
+   - Pendiente, no bloqueante: visualizar la ergosfera (la fórmula general con
+     dependencia en θ ya se puede derivar de `ergosphereEquatorialRadius`, pero no se
+     implementó en este PR — el foco fue el shader).
 6. Disco de acreción con gradiente de temperatura físico + beaming Doppler y corrimiento
    al rojo gravitacional.
 7. Controles de calidad (pasos del integrador / resolución del shader) para balancear
