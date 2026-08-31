@@ -197,7 +197,7 @@ describe('traceKerrRay', () => {
         maxSteps: 20000,
         dTau: 0.0005,
         maxRadius: 2000,
-        disk: { innerRadius: 6, outerRadius: 60, halfAngle: 0 },
+        disk: { innerRadius: 6, outerRadius: 60, halfThickness: 0 },
       })
 
       expect(result.diskHit).toBeDefined()
@@ -210,7 +210,7 @@ describe('traceKerrRay', () => {
         maxSteps: 20000,
         dTau: 0.0005,
         maxRadius: 2000,
-        disk: { innerRadius: 15, outerRadius: 60, halfAngle: 0 },
+        disk: { innerRadius: 15, outerRadius: 60, halfThickness: 0 },
       })
 
       expect(result.diskHit).toBeUndefined()
@@ -233,7 +233,7 @@ describe('traceKerrRay', () => {
         maxSteps: 20000,
         dTau: 0.0005,
         maxRadius: 2000,
-        disk: { innerRadius: 6, outerRadius: 60, halfAngle: 0 },
+        disk: { innerRadius: 6, outerRadius: 60, halfThickness: 0 },
       })
 
       expect(result.diskHit).toBeDefined()
@@ -245,21 +245,22 @@ describe('traceKerrRay', () => {
         maxSteps: 20000,
         dTau: 0.0005,
         maxRadius: 2000,
-        disk: { innerRadius: 6, outerRadius: 60, halfAngle: 0 },
+        disk: { innerRadius: 6, outerRadius: 60, halfThickness: 0 },
       })
       const thick = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
         maxSteps: 20000,
         dTau: 0.0005,
         maxRadius: 2000,
-        disk: { innerRadius: 6, outerRadius: 60, halfAngle: 0.2 },
+        disk: { innerRadius: 6, outerRadius: 60, halfThickness: 0.5 },
       })
 
       expect(thin.diskHit).toBeDefined()
       expect(thick.diskHit).toBeDefined()
       // The ray approaches from above (camera y=20 > 0), so it should hit
-      // the *upper* face first, off the exact midplane by ~radius·sin(halfAngle).
-      expect(thick.diskHit!.position[1]).toBeGreaterThan(0.1)
-      expect(Math.abs(thick.diskHit!.position[1])).toBeCloseTo(thick.diskHit!.radius * Math.sin(0.2), 1)
+      // the *upper* face first, at exactly y=halfThickness — a constant,
+      // unlike the angle-based version this replaced (see checkDiskBoundaryY's
+      // doc comment in lensing.ts), regardless of the hit radius.
+      expect(thick.diskHit!.position[1]).toBeCloseTo(0.5, 5)
     })
   })
 })

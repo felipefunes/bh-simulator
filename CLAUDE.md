@@ -465,21 +465,37 @@ clasificación del caso) de forma aislada del render.
    - **Espesor del disco**, pedido explícito del usuario tras revisar (los discos
      reales no son un plano infinitesimal, y uno lo es se vuelve invisible visto
      exactamente de canto). El chequeo de cruce, que antes buscaba θ=π/2 exacto
-     (Kerr) o y=0 exacto (Schwarzschild), ahora busca la entrada a un *slab*
-     angular (`disk.halfAngle`, en `DiskBounds` de ambos módulos — 0 reproduce
-     el plano original) — dos caras (π/2∓halfAngle en Kerr; ±r·sin(halfAngle)
-     en el y de Schwarzschild, ya que ese tracer trabaja en y del mundo en vez
-     de θ) en vez de una. La reconstrucción de posición en Kerr pasó a usar la
-     fórmula general (sinθ·cosφ·xRef + sinθ·senφ·yRef + cosθ·spinAxis) en vez
-     del atajo válido sólo en θ=π/2 exacto; en Schwarzschild no hizo falta
-     cambiar nada ahí — la fórmula `r·cosφ·e1 + r·senφ·e2` ya reconstruye el
-     punto 3D exacto para cualquier y, sea 0 o no. `DISK_HALF_ANGLE = 0.12`
-     rad en `LensedBackground.tsx` (sin(0.12)≈12% de aspecto altura/radio en
-     el borde interno) — un valor fijo, no expuesto en el sidebar por ahora.
-     Testeado en vitest (ambos módulos) antes de portar a GLSL, mismo patrón
-     de siempre. Verificado en el navegador: el disco muestra un borde visible
-     de verdad en ángulos cercanos a de canto, en vez de desaparecer como una
-     línea infinitamente fina.
+     (Kerr) o y=0 exacto (Schwarzschild), ahora busca la entrada a un *slab* —
+     dos caras en vez de una — dentro de `[innerRadius, outerRadius]`.
+     - Primera versión (buggy): el slab se definía por ángulo fijo desde el
+       origen (`disk.halfAngle`, caras en π/2∓halfAngle en Kerr, ±r·sin(halfAngle)
+       en el y de Schwarzschild). Reportado por el usuario como **"se nos
+       convirtió en un hi-hat lol"**, con captura mostrando el disco, visto casi
+       exactamente de canto, como dos conos que se encuentran en un punto — un
+       reloj de arena, no un disco delgado. Causa: un umbral angular es
+       literalmente un cono cuyo espesor físico (r·sin(halfAngle)) crece sin
+       límite con r; bajo la lente gravitacional propia del disco cerca de la
+       sombra, visto casi de canto, ese cono se estira hasta ocupar casi todo el
+       cuadro en vez de verse como un borde sutil.
+     - Fix: el slab pasó a definirse por espesor físico *constante*
+       (`disk.halfThickness`, en `DiskBounds` de ambos módulos — 0 reproduce el
+       plano original), no por ángulo — dos caras a altura mundial
+       ±halfThickness (comparado contra r·cosθ en Kerr, contra y en Schwarzschild
+       ya que ese tracer ya trabaja en y del mundo) en vez de ±r·sin(halfAngle).
+       Así el disco es un slab plano de verdad a cualquier radio, en vez de un
+       cono que se abre. La reconstrucción de posición en Kerr, al ya no conocer
+       θ en el punto de cruce (sólo y exacto y r interpolado), pasa por
+       ρ=√(r²−y²) (distancia al eje de spin en el plano) en vez de sinθ/cosθ;
+       en Schwarzschild no hizo falta cambiar nada — `r·cosφ·e1 + r·senφ·e2` ya
+       reconstruye el punto 3D exacto para cualquier y. `DISK_HALF_THICKNESS_RATIO
+       = 0.15` en `LensedBackground.tsx`, aplicado como fracción de
+       `innerRadius` (espesor físico fijo por sesión, no un ángulo) — un valor
+       fijo, no expuesto en el sidebar por ahora. Testeado en vitest (ambos
+       módulos, casos de espesor 0 y >0) antes de portar a GLSL, mismo patrón de
+       siempre. Verificado en el navegador reproduciendo ángulos cercanos a de
+       canto (incluyendo el mismo tipo de encuadre del reporte original): borde
+       del disco visible como una franja delgada consistente, sin forma de
+       reloj de arena/hi-hat a ningún ángulo probado.
    - **Textura de flujo rotante**, para recuperar la sensación de giro que se
      perdió al reemplazar las partículas (un disco analítico estacionario y
      simétrico genuinamente no necesita animarse — su patrón de brillo no

@@ -15,12 +15,23 @@ const SPHERE_RADIUS = 500
 // theta/phi for every pixel regardless of screen position, collapsing the
 // entire lensed background to a single sampled texture color.
 const MAX_RAY_RADIUS = 400
-// Angular half-thickness of the disk slab (roadmap: "un poco de espesor" —
-// real accretion disks aren't infinitesimally thin, and a real plane is
-// invisible when viewed exactly edge-on, which looked wrong). sin(0.12) ≈
-// 0.12, i.e. roughly a 12% height/radius aspect ratio at the inner edge —
-// enough to read as a genuine slab edge-on without turning it into a torus.
-const DISK_HALF_ANGLE = 0.12
+// Disk half-thickness (roadmap: "un poco de espesor" — real accretion disks
+// aren't infinitesimally thin, and a real plane is invisible when viewed
+// exactly edge-on, which looked wrong), as a constant *fraction of
+// innerRadius* rather than a fixed length — so it scales with the disk's
+// own size across different mass/spin combinations, the same way
+// innerRadius/outerRadius already do.
+//
+// A first version used a fixed *angle* from the equator (so the slab's
+// physical thickness grew proportionally with r, i.e. a literal cone from
+// the origin) instead of a constant height. Visual QA at a near-edge-on
+// camera angle showed why that was wrong: under the disk's own strong
+// lensing near the shadow, that flaring cone turned into a dramatic
+// hourglass/"hi-hat" shape spanning most of the frame, not a subtly-thick
+// disk. A constant physical half-thickness (this version, computed from
+// innerRadius where params.disk is turned into a uniform, below) keeps the
+// disk a real flat slab at every radius instead of flaring open.
+const DISK_HALF_THICKNESS_RATIO = 0.15
 // 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
 // angle without bound near the photon sphere (in the limit, a full ring of
 // sky maps to a single point), so any raster texture's 8-bit gradient steps
@@ -183,9 +194,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   // has 0 < innerRadius < outerRadius.
   uniform float uDiskInnerRadius;
   uniform float uDiskOuterRadius;
-  // Angular half-thickness (radians) of the disk slab around the equatorial
-  // plane — see physics/kerrLensing.ts's DiskBounds for the rationale.
-  uniform float uDiskHalfAngle;
+  // Constant half-thickness (same length units as mass/radius) of the disk
+  // slab around the equatorial plane — see physics/kerrLensing.ts's
+  // DiskBounds for the rationale.
+  uniform float uDiskHalfThickness;
   // Elapsed time (seconds) and a tileable procedural noise texture, for the
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
@@ -299,21 +311,30 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 
   // Checks one segment of a Schwarzschild ray's step for a crossing of one
-  // face of the disk's slab (world-space y = faceSign · r · sinHalfAngle —
-  // the disk's two faces, or exactly y=0 for a zero-thickness disk) — see
-  // traceSchwarzschild's use of this (four segments × two faces per step,
-  // across its RK4 stage points, mirroring checkDiskSegment for Kerr's θ)
-  // for why a single per-step endpoint check isn't enough. The threshold is
-  // evaluated at each point's own r (approximated as linear across the
-  // segment, same caveat as everywhere else this file interpolates).
+  // face of the disk's slab (world-space y = faceSign · halfThickness — a
+  // *constant* height, the same everywhere along the disk, not one that
+  // grows with r — the disk's two faces, or exactly y=0 for a
+  // zero-thickness disk) — see traceSchwarzschild's use of this (four
+  // segments × two faces per step, across its RK4 stage points, mirroring
+  // checkDiskSegment for Kerr's θ) for why a single per-step endpoint check
+  // isn't enough.
+  //
+  // A first version made the threshold r·sin(halfAngle) — a fixed *angle*
+  // from the equator (a cone from the origin) rather than a fixed height.
+  // Visual QA at a near-edge-on camera angle showed why that was wrong: a
+  // cone's half-thickness grows without bound with r, and under the disk's
+  // own strong lensing near the shadow that turned into a dramatic
+  // hourglass/"hi-hat" shape spanning most of the frame, not a subtly-thick
+  // disk. A constant physical thickness (this version) avoids that — the
+  // disk stays a real flat slab at every radius instead of flaring open.
   bool checkDiskSegmentY(
     float aR, float aPhi, float bR, float bPhi,
-    float e1y, float e2y, float faceSign, float sinHalfAngle,
+    float e1y, float e2y, float faceSign, float halfThickness,
     float innerRadius, float outerRadius,
     out float hitRadius, out float hitPhi
   ) {
-    float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y) - faceSign * aR * sinHalfAngle;
-    float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y) - faceSign * bR * sinHalfAngle;
+    float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y) - faceSign * halfThickness;
+    float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y) - faceSign * halfThickness;
     if (ay * by >= 0.0) return false;
     float fraction = ay / (ay - by);
     float r = aR + fraction * (bR - aR);
@@ -388,18 +409,17 @@ const FRAGMENT_SHADER = /* glsl */ `
         float phiEnd = prevPhi + uSchwDPhi;
         float newR = 1.0 / u;
 
-        float sinHalfAngle = sin(uDiskHalfAngle);
         float hitR;
         float hitPhi;
         if (
-          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, 1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, -1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, 1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, -1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, 1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, -1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, 1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, -1.0, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -451,30 +471,44 @@ const FRAGMENT_SHADER = /* glsl */ `
   // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
   // handles phi being outside [-π, π] for free.
   // Checks one segment of a Kerr ray's step for a crossing of one face of
-  // the disk's slab (θ = boundaryTheta — π/2 ∓ halfAngle, the disk's two
-  // faces, or exactly π/2 for a zero-thickness disk) — see traceKerr's use
-  // of this (four segments × two faces per step, across its RK4 stage
-  // points) for why a single per-step endpoint check isn't enough. Takes
-  // explicit points rather than an array to stay clear of GLSL ES 1.00's
-  // restrictions on dynamically-indexed arrays. The hit position uses the
-  // general (θ,φ)→direction formula (not the θ=π/2-only xRef·cosφ+yRef·sinφ
-  // shortcut) since a thick disk's faces aren't at the equator exactly.
+  // the disk's slab (world-space y = faceSign · halfThickness — a constant
+  // height, the disk's two faces, or exactly y=0 for a zero-thickness disk;
+  // y = r·cosθ since the spin axis is world Y) — see traceKerr's use of
+  // this (four segments × two faces per step, across its RK4 stage points)
+  // for why a single per-step endpoint check isn't enough. Takes explicit
+  // points rather than an array to stay clear of GLSL ES 1.00's
+  // restrictions on dynamically-indexed arrays.
+  //
+  // A first version made the threshold a fixed *angle* from the equator
+  // (θ = π/2 ∓ halfAngle, a cone from the origin) rather than a fixed
+  // height. Visual QA at a near-edge-on camera angle showed why that was
+  // wrong: a cone's half-thickness grows without bound with r, and under
+  // the disk's own strong lensing near the shadow that turned into a
+  // dramatic hourglass/"hi-hat" shape spanning most of the frame, not a
+  // subtly-thick disk. A constant physical thickness (this version) avoids
+  // that — the disk stays a real flat slab at every radius instead of
+  // flaring open. The hit position is reconstructed from (r, y, φ) directly
+  // — ρ = √(r²−y²) is the in-plane (xRef/yRef) distance from the spin axis
+  // — rather than via θ, since only y (the exact face height) and r
+  // (interpolated) are known at the crossing, not θ itself.
   bool checkDiskSegment(
     float aR, float aTheta, float aPhi,
     float bR, float bTheta, float bPhi,
-    float boundaryTheta,
+    float faceSign, float halfThickness,
     vec3 xRef, vec3 yRef, float innerRadius, float outerRadius,
     out float hitRadius, out vec3 hitPosition
   ) {
-    if ((aTheta - boundaryTheta) * (bTheta - boundaryTheta) >= 0.0) return false;
-    float fraction = (boundaryTheta - aTheta) / (bTheta - aTheta);
+    float ay = aR * cos(aTheta) - faceSign * halfThickness;
+    float by = bR * cos(bTheta) - faceSign * halfThickness;
+    if (ay * by >= 0.0) return false;
+    float fraction = ay / (ay - by);
     float r = aR + fraction * (bR - aR);
     if (r < innerRadius || r > outerRadius) return false;
-    float hitPhi = aPhi + fraction * (bPhi - aPhi);
-    float sinBoundary = sin(boundaryTheta);
-    float cosBoundary = cos(boundaryTheta);
+    float phi = aPhi + fraction * (bPhi - aPhi);
+    float y = faceSign * halfThickness;
+    float rho = sqrt(max(0.0, r * r - y * y));
     hitRadius = r;
-    hitPosition = r * (sinBoundary * cos(hitPhi) * xRef + sinBoundary * sin(hitPhi) * yRef + cosBoundary * SPIN_AXIS);
+    hitPosition = rho * cos(phi) * xRef + rho * sin(phi) * yRef + y * SPIN_AXIS;
     return true;
   }
 
@@ -623,19 +657,17 @@ const FRAGMENT_SHADER = /* glsl */ `
         float phi3 = phi + (uKerrDTau * 0.5) * k2dphi;
         float phi4 = phi + uKerrDTau * k3dphi;
 
-        float upperFace = PI * 0.5 - uDiskHalfAngle;
-        float lowerFace = PI * 0.5 + uDiskHalfAngle;
         float hitR;
         vec3 hitPos;
         if (
-          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r4, th4, phi4, r, theta, phi, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r4, th4, phi4, r, theta, phi, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, 1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, -1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, 1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, -1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, 1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, -1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, 1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, -1.0, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -790,7 +822,7 @@ export function LensedBackground({
       uKerrDTau: { value: KERR_D_TAU },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
-      uDiskHalfAngle: { value: disk ? DISK_HALF_ANGLE : 0 },
+      uDiskHalfThickness: { value: disk ? DISK_HALF_THICKNESS_RATIO * disk.innerRadius : 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
     }),
@@ -814,7 +846,7 @@ export function LensedBackground({
     material.uniforms.uKerrDTau.value = KERR_D_TAU
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
-    material.uniforms.uDiskHalfAngle.value = disk ? DISK_HALF_ANGLE : 0
+    material.uniforms.uDiskHalfThickness.value = disk ? DISK_HALF_THICKNESS_RATIO * disk.innerRadius : 0
   })
 
   return (

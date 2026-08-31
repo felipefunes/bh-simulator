@@ -2,22 +2,30 @@ import { add, scale, type Vec3 } from './vec3'
 
 /**
  * Checks one segment of a ray's step for a crossing of one face of the
- * disk's slab (world-space y = faceSign · r · sinHalfAngle — the two faces
- * of the disk, or exactly y=0 for a zero-thickness disk) within
- * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
- * The threshold is evaluated at each point's own r (approximated as linear
- * across the segment, same caveat as everywhere else this file interpolates).
+ * disk's slab (world-space y = faceSign · halfThickness — a *constant*
+ * height, the same everywhere along the disk — or exactly y=0 for a
+ * zero-thickness disk) within [innerRadius, outerRadius]. Returns the
+ * interpolated hit point, or null.
+ *
+ * A first version made the threshold r·sin(halfAngle) — a fixed *angle*
+ * from the equator (a cone from the origin) rather than a fixed height.
+ * Visual QA at a near-edge-on camera angle showed why that was wrong: a
+ * cone's half-thickness grows without bound with r, and under the disk's
+ * own strong lensing near the shadow that turned into a dramatic hourglass/
+ * "hi-hat" shape spanning most of the frame, not a subtly-thick disk. A
+ * constant physical thickness (this version) avoids that — the disk stays
+ * a real flat slab at every radius instead of flaring open.
  */
 function checkDiskBoundaryY(
   aR: number, aPhi: number, aY: number,
   bR: number, bPhi: number, bY: number,
   faceSign: number,
-  sinHalfAngle: number,
+  halfThickness: number,
   innerRadius: number,
   outerRadius: number,
 ): { radius: number; phi: number } | null {
-  const aG = aY - faceSign * aR * sinHalfAngle
-  const bG = bY - faceSign * bR * sinHalfAngle
+  const aG = aY - faceSign * halfThickness
+  const bG = bY - faceSign * halfThickness
   if (aG * bG >= 0) return null
   const fraction = aG / (aG - bG)
   const radius = aR + fraction * (bR - aR)
@@ -40,13 +48,12 @@ export interface DiskBounds {
   innerRadius: number
   outerRadius: number
   /**
-   * Angular half-thickness (radians) of the disk around the equatorial
-   * (world-space y=0) plane — see kerrLensing.ts's DiskBounds for the
-   * rationale. Expressed here as a world-space y threshold of r·sin(halfAngle)
-   * at a given radius r, since this tracer works in world-space y rather
-   * than θ directly. 0 reproduces the original zero-thickness plane.
+   * Constant half-thickness (in the same length units as mass/radius) of
+   * the disk around the equatorial (world-space y=0) plane — see
+   * kerrLensing.ts's DiskBounds and this file's checkDiskBoundaryY for the
+   * rationale. 0 reproduces the original zero-thickness plane.
    */
-  halfAngle: number
+  halfThickness: number
 }
 
 export interface RayOutcome {
@@ -181,14 +188,12 @@ export function traceSchwarzschildRay(
         pphi,
         pr * (Math.cos(pphi) * disk.e1[1] + Math.sin(pphi) * disk.e2[1]),
       ])
-      const sinHalfAngle = Math.sin(disk.halfAngle)
-
       for (let i = 1; i < points.length; i++) {
         const [aR, aPhi, aY] = points[i - 1]
         const [bR, bPhi, bY] = points[i]
         const hit =
-          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, 1, sinHalfAngle, disk.innerRadius, disk.outerRadius) ??
-          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, -1, sinHalfAngle, disk.innerRadius, disk.outerRadius)
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, 1, disk.halfThickness, disk.innerRadius, disk.outerRadius) ??
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, -1, disk.halfThickness, disk.innerRadius, disk.outerRadius)
         if (hit) {
           const { radius: hitR, phi: hitPhi } = hit
           const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
