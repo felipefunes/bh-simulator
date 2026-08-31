@@ -15,6 +15,12 @@ const SPHERE_RADIUS = 500
 // theta/phi for every pixel regardless of screen position, collapsing the
 // entire lensed background to a single sampled texture color.
 const MAX_RAY_RADIUS = 400
+// Angular half-thickness of the disk slab (roadmap: "un poco de espesor" —
+// real accretion disks aren't infinitesimally thin, and a real plane is
+// invisible when viewed exactly edge-on, which looked wrong). sin(0.12) ≈
+// 0.12, i.e. roughly a 12% height/radius aspect ratio at the inner edge —
+// enough to read as a genuine slab edge-on without turning it into a torus.
+const DISK_HALF_ANGLE = 0.12
 // 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
 // angle without bound near the photon sphere (in the limit, a full ring of
 // sky maps to a single point), so any raster texture's 8-bit gradient steps
@@ -75,6 +81,57 @@ function generateGalaxyBackgroundTexture(): THREE.Texture {
   return texture
 }
 
+const FLOW_TEXTURE_WIDTH = 1024
+const FLOW_TEXTURE_HEIGHT = 256
+
+// Procedural turbulence for the disk's "flow" look (roadmap: bring back the
+// sense of rotation lost when the particle disk was replaced by a static
+// analytic surface). U maps to φ around the disk — sampled through
+// RepeatWrapping, so it must tile seamlessly at the U=0/1 seam — and each
+// blob is drawn three times (shifted by ∓width) to guarantee that; V maps
+// to normalized radius, and doesn't need to tile. Several octaves of soft
+// blobs at different scales, layered on a neutral-gray base so diskColor's
+// sampled value reads as "brightness relative to 1", not an absolute one.
+function generateDiskFlowTexture(): THREE.Texture {
+  const canvas = document.createElement('canvas')
+  canvas.width = FLOW_TEXTURE_WIDTH
+  canvas.height = FLOW_TEXTURE_HEIGHT
+  const ctx = canvas.getContext('2d')!
+
+  ctx.fillStyle = '#808080'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  const octaves = [
+    { count: 40, radius: 90, alpha: 0.22 },
+    { count: 90, radius: 40, alpha: 0.18 },
+    { count: 180, radius: 16, alpha: 0.14 },
+  ]
+
+  for (const { count, radius, alpha } of octaves) {
+    for (let i = 0; i < count; i++) {
+      const x = Math.random() * canvas.width
+      const y = Math.random() * canvas.height
+      const lighter = Math.random() > 0.5
+      const shade = lighter ? 255 : 0
+      for (const dx of [-canvas.width, 0, canvas.width]) {
+        const gradient = ctx.createRadialGradient(x + dx, y, 0, x + dx, y, radius)
+        gradient.addColorStop(0, `rgba(${shade}, ${shade}, ${shade}, ${alpha})`)
+        gradient.addColorStop(1, `rgba(${shade}, ${shade}, ${shade}, 0)`)
+        ctx.fillStyle = gradient
+        ctx.beginPath()
+        ctx.arc(x + dx, y, radius, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.needsUpdate = true
+  return texture
+}
+
 const VERTEX_SHADER = /* glsl */ `
   varying vec3 vWorldPos;
 
@@ -126,6 +183,13 @@ const FRAGMENT_SHADER = /* glsl */ `
   // has 0 < innerRadius < outerRadius.
   uniform float uDiskInnerRadius;
   uniform float uDiskOuterRadius;
+  // Angular half-thickness (radians) of the disk slab around the equatorial
+  // plane — see physics/kerrLensing.ts's DiskBounds for the rationale.
+  uniform float uDiskHalfAngle;
+  // Elapsed time (seconds) and a tileable procedural noise texture, for the
+  // disk's rotating "flow" look — see diskColor's use of these below.
+  uniform float uTime;
+  uniform sampler2D uDiskFlowTexture;
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
@@ -133,6 +197,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   const float PI = 3.14159265359;
   const vec3 SPIN_AXIS = vec3(0.0, 1.0, 0.0);
   const float PEAK_TEMPERATURE_KELVIN = 14000.0;
+  // Real Keplerian angular speeds are minutes-per-orbit even at the inner
+  // edge — matches AccretionDisk.tsx's old VISUAL_TIME_SCALE, kept for the
+  // same reason (legibility), not physical accuracy.
+  const float VISUAL_TIME_SCALE = 15.0;
 
   // Mirrors src/physics/accretionDisk.ts exactly (Shakura & Sunyaev 1973
   // profile) — see that module for the derivation and vitest coverage.
@@ -201,7 +269,27 @@ const FRAGMENT_SHADER = /* glsl */ `
     float betaLineOfSight = orbitalSpeedGLSL(uMass, radius) * dot(tangential, towardCamera);
     float doppler = dopplerFactorGLSL(uMass, radius, betaLineOfSight);
     float baseTemperature = diskTemperatureGLSL(uDiskInnerRadius, radius);
-    return blackbodyColorGLSL(baseTemperature * doppler) * pow(doppler, 3.0);
+    vec3 color = blackbodyColorGLSL(baseTemperature * doppler) * pow(doppler, 3.0);
+
+    // Flow texture (roadmap: bring back the sense of rotation the old
+    // particle disk showed, lost when it became a static analytic surface —
+    // a symmetric steady-state disk's brightness *pattern* genuinely
+    // doesn't change over time, so nothing here needed to animate before
+    // this). world-frame φ (this convention, not any particular tracer's
+    // own — position is already an exact world-space point regardless of
+    // which tracer produced it) minus the local Keplerian Ω(r)·t puts the
+    // noise texture in a frame co-rotating with the gas at that radius, so
+    // it visibly advects around the disk — faster near the ISCO than at
+    // the outer edge, same real differential rotation as physics/orbits.ts,
+    // just VISUAL_TIME_SCALE-sped-up for the same reason the old particle
+    // disk was (real Keplerian speeds here are minutes-per-orbit).
+    float worldPhi = atan(-position.z, position.x);
+    float omega = sqrt(uMass / (radius * radius * radius));
+    float flowPhi = worldPhi - omega * uTime * VISUAL_TIME_SCALE;
+    float flowU = flowPhi / (2.0 * PI) + 0.5;
+    float flowV = clamp((radius - uDiskInnerRadius) / max(1e-6, uDiskOuterRadius - uDiskInnerRadius), 0.0, 1.0);
+    float flow = texture2D(uDiskFlowTexture, vec2(flowU, flowV)).r;
+    return color * (0.7 + 0.6 * flow);
   }
 
   vec2 equirectUv(vec3 dir) {
@@ -210,17 +298,22 @@ const FRAGMENT_SHADER = /* glsl */ `
     return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
   }
 
-  // Checks one segment of a Schwarzschild ray's step for a disk-plane
-  // (world-space y=0) crossing — see traceSchwarzschild's use of this (four
-  // calls per step, across its RK4 stage points, mirroring checkDiskSegment
-  // for Kerr's θ) for why a single per-step endpoint check isn't enough.
+  // Checks one segment of a Schwarzschild ray's step for a crossing of one
+  // face of the disk's slab (world-space y = faceSign · r · sinHalfAngle —
+  // the disk's two faces, or exactly y=0 for a zero-thickness disk) — see
+  // traceSchwarzschild's use of this (four segments × two faces per step,
+  // across its RK4 stage points, mirroring checkDiskSegment for Kerr's θ)
+  // for why a single per-step endpoint check isn't enough. The threshold is
+  // evaluated at each point's own r (approximated as linear across the
+  // segment, same caveat as everywhere else this file interpolates).
   bool checkDiskSegmentY(
     float aR, float aPhi, float bR, float bPhi,
-    float e1y, float e2y, float innerRadius, float outerRadius,
+    float e1y, float e2y, float faceSign, float sinHalfAngle,
+    float innerRadius, float outerRadius,
     out float hitRadius, out float hitPhi
   ) {
-    float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y);
-    float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y);
+    float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y) - faceSign * aR * sinHalfAngle;
+    float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y) - faceSign * bR * sinHalfAngle;
     if (ay * by >= 0.0) return false;
     float fraction = ay / (ay - by);
     float r = aR + fraction * (bR - aR);
@@ -295,13 +388,18 @@ const FRAGMENT_SHADER = /* glsl */ `
         float phiEnd = prevPhi + uSchwDPhi;
         float newR = 1.0 / u;
 
+        float sinHalfAngle = sin(uDiskHalfAngle);
         float hitR;
         float hitPhi;
         if (
-          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, 1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, -1.0, sinHalfAngle, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -352,24 +450,31 @@ const FRAGMENT_SHADER = /* glsl */ `
   // straight from the already-smooth, already-accumulated phi sidesteps
   // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
   // handles phi being outside [-π, π] for free.
-  // Checks one segment of a Kerr ray's step for a disk-plane (θ=π/2)
-  // crossing — see traceKerr's use of this (four calls per step, across
-  // its RK4 stage points) for why a single per-step endpoint check isn't
-  // enough. Takes explicit points rather than an array to stay clear of
-  // GLSL ES 1.00's restrictions on dynamically-indexed arrays.
+  // Checks one segment of a Kerr ray's step for a crossing of one face of
+  // the disk's slab (θ = boundaryTheta — π/2 ∓ halfAngle, the disk's two
+  // faces, or exactly π/2 for a zero-thickness disk) — see traceKerr's use
+  // of this (four segments × two faces per step, across its RK4 stage
+  // points) for why a single per-step endpoint check isn't enough. Takes
+  // explicit points rather than an array to stay clear of GLSL ES 1.00's
+  // restrictions on dynamically-indexed arrays. The hit position uses the
+  // general (θ,φ)→direction formula (not the θ=π/2-only xRef·cosφ+yRef·sinφ
+  // shortcut) since a thick disk's faces aren't at the equator exactly.
   bool checkDiskSegment(
     float aR, float aTheta, float aPhi,
     float bR, float bTheta, float bPhi,
+    float boundaryTheta,
     vec3 xRef, vec3 yRef, float innerRadius, float outerRadius,
     out float hitRadius, out vec3 hitPosition
   ) {
-    if ((aTheta - PI * 0.5) * (bTheta - PI * 0.5) >= 0.0) return false;
-    float fraction = (PI * 0.5 - aTheta) / (bTheta - aTheta);
+    if ((aTheta - boundaryTheta) * (bTheta - boundaryTheta) >= 0.0) return false;
+    float fraction = (boundaryTheta - aTheta) / (bTheta - aTheta);
     float r = aR + fraction * (bR - aR);
     if (r < innerRadius || r > outerRadius) return false;
     float hitPhi = aPhi + fraction * (bPhi - aPhi);
+    float sinBoundary = sin(boundaryTheta);
+    float cosBoundary = cos(boundaryTheta);
     hitRadius = r;
-    hitPosition = r * cos(hitPhi) * xRef + r * sin(hitPhi) * yRef;
+    hitPosition = r * (sinBoundary * cos(hitPhi) * xRef + sinBoundary * sin(hitPhi) * yRef + cosBoundary * SPIN_AXIS);
     return true;
   }
 
@@ -518,13 +623,19 @@ const FRAGMENT_SHADER = /* glsl */ `
         float phi3 = phi + (uKerrDTau * 0.5) * k2dphi;
         float phi4 = phi + uKerrDTau * k3dphi;
 
+        float upperFace = PI * 0.5 - uDiskHalfAngle;
+        float lowerFace = PI * 0.5 + uDiskHalfAngle;
         float hitR;
         vec3 hitPos;
         if (
-          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r4, th4, phi4, r, theta, phi, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, upperFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, lowerFace, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -655,8 +766,10 @@ export function LensedBackground({
   const { camera } = useThree()
   const materialRef = useRef<THREE.ShaderMaterial>(null)
   const texture = useMemo(() => generateGalaxyBackgroundTexture(), [])
+  const flowTexture = useMemo(() => generateDiskFlowTexture(), [])
 
   useEffect(() => () => texture.dispose(), [texture])
+  useEffect(() => () => flowTexture.dispose(), [flowTexture])
 
   // Initial uniform values only — every frame after that, updates go through
   // materialRef (see useFrame below), never by mutating this object, so it's
@@ -677,11 +790,14 @@ export function LensedBackground({
       uKerrDTau: { value: KERR_D_TAU },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
+      uDiskHalfAngle: { value: disk ? DISK_HALF_ANGLE : 0 },
+      uTime: { value: 0 },
+      uDiskFlowTexture: { value: flowTexture },
     }),
-    [texture, params.mass, params.spin, params.charge, horizonRadius, quality, disk],
+    [texture, flowTexture, params.mass, params.spin, params.charge, horizonRadius, quality, disk],
   )
 
-  useFrame(() => {
+  useFrame((state) => {
     const material = materialRef.current
     if (!material) return
     material.uniforms.uCameraPos.value.copy(camera.position)
@@ -690,6 +806,7 @@ export function LensedBackground({
     material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
     material.uniforms.uMaxRadius.value = MAX_RAY_RADIUS
+    material.uniforms.uTime.value = state.clock.elapsedTime
     const preset = INTEGRATOR_QUALITY[quality]
     material.uniforms.uSchwSteps.value = preset.schwSteps
     material.uniforms.uSchwDPhi.value = preset.schwDPhi
@@ -697,6 +814,7 @@ export function LensedBackground({
     material.uniforms.uKerrDTau.value = KERR_D_TAU
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
+    material.uniforms.uDiskHalfAngle.value = disk ? DISK_HALF_ANGLE : 0
   })
 
   return (

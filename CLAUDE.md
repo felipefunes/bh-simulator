@@ -462,6 +462,76 @@ clasificación del caso) de forma aislada del render.
        delicado, no con el bug original. Repetido con carga (Reissner–Nordström)
        en "Baja": mismo resultado limpio, confirmando que el fix cubre el
        integrador Kerr–Newman completo (no sólo el caso de spin puro).
+   - **Espesor del disco**, pedido explícito del usuario tras revisar (los discos
+     reales no son un plano infinitesimal, y uno lo es se vuelve invisible visto
+     exactamente de canto). El chequeo de cruce, que antes buscaba θ=π/2 exacto
+     (Kerr) o y=0 exacto (Schwarzschild), ahora busca la entrada a un *slab*
+     angular (`disk.halfAngle`, en `DiskBounds` de ambos módulos — 0 reproduce
+     el plano original) — dos caras (π/2∓halfAngle en Kerr; ±r·sin(halfAngle)
+     en el y de Schwarzschild, ya que ese tracer trabaja en y del mundo en vez
+     de θ) en vez de una. La reconstrucción de posición en Kerr pasó a usar la
+     fórmula general (sinθ·cosφ·xRef + sinθ·senφ·yRef + cosθ·spinAxis) en vez
+     del atajo válido sólo en θ=π/2 exacto; en Schwarzschild no hizo falta
+     cambiar nada ahí — la fórmula `r·cosφ·e1 + r·senφ·e2` ya reconstruye el
+     punto 3D exacto para cualquier y, sea 0 o no. `DISK_HALF_ANGLE = 0.12`
+     rad en `LensedBackground.tsx` (sin(0.12)≈12% de aspecto altura/radio en
+     el borde interno) — un valor fijo, no expuesto en el sidebar por ahora.
+     Testeado en vitest (ambos módulos) antes de portar a GLSL, mismo patrón
+     de siempre. Verificado en el navegador: el disco muestra un borde visible
+     de verdad en ángulos cercanos a de canto, en vez de desaparecer como una
+     línea infinitamente fina.
+   - **Textura de flujo rotante**, para recuperar la sensación de giro que se
+     perdió al reemplazar las partículas (un disco analítico estacionario y
+     simétrico genuinamente no necesita animarse — su patrón de brillo no
+     cambia con el tiempo en ese modelo idealizado — así que no había nada que
+     animar antes de esto). Textura de ruido procedural tileable
+     (`generateDiskFlowTexture()`, canvas 2D, mismo patrón que la textura de
+     fondo: varias octavas de blobs suaves, cada uno dibujado tres veces
+     (∓ancho) para que el borde U=0/1 empalme sin costura ya que se samplea
+     con `RepeatWrapping`) sampleada en `diskColor()` con coordenadas
+     co-rotantes: φ mundial (recuperado directo de `position`, sin importar
+     qué tracer generó el punto — es un punto 3D exacto de por sí, no hace
+     falta el φ interno de ningún tracer) menos Ω(r)·t·`VISUAL_TIME_SCALE`
+     (Ω Kepleriano = √(M/r³), mismo ×15 de siempre para legibilidad). El
+     resultado modula el brillo del color analítico ya existente (no lo
+     reemplaza), y al ser Ω(r) decreciente con r, el patrón gira visiblemente
+     más rápido cerca del ISCO que en el borde exterior — la misma rotación
+     diferencial real, ahora visible. Verificado en el navegador: patrón de
+     turbulencia claramente animado (dos capturas separadas por unos segundos
+     muestran el patrón desplazado), con el streaking característico de
+     rotación diferencial más marcado cerca del borde interno.
+9. **Modo Visual vs. Riguroso** (idea del usuario, pendiente de implementar).
+   Motivación: éste es ante todo un simulador *educativo/visual* — nadie está
+   mirando las ecuaciones, están mirando el render — y aun con `KERR_STEPS`
+   fijo en un valor alto (ítem 8), el usuario sigue sintiendo que spin/carga
+   "no mejoran" tanto como Schwarzschild. Dado que (a) el frame dragging no es
+   algo que el usuario vaya a medir a simple vista, sólo notar cualitativamente,
+   y (b) el efecto visual de la carga eléctrica es casi imperceptible (y ni
+   siquiera está claro que agujeros negros cargados existan en la realidad),
+   tiene sentido simplificar la física para el caso común sin tirar el trabajo
+   riguroso ya hecho.
+   Propuesta (mía, aceptada en principio por el usuario, sin diseñar en
+   detalle todavía): agregar un modo "Riguroso" (el integrador Kerr–Newman
+   actual, geodésicas exactas vía constante de Carter, intacto tal cual está)
+   y un modo "Visual" (nuevo, probablemente default) que:
+   - Calcula horizonte/ergosfera/ISCO/esfera de fotones con las fórmulas
+     cerradas exactas que ya existen en `physics/metric.ts`/`physics/orbits.ts`
+     (instantáneas, no iterativas) — el tamaño de la sombra y del disco siguen
+     siendo Kerr–Newman correctos.
+   - Traza los rayos con el integrador Schwarzschild-2D ya robusto (el mismo
+     que nunca tuvo los problemas de precisión cerca de la esfera de fotones
+     que motivaron el ítem 8), sumándole un sesgo simple de frame dragging
+     (asimetría prógrado/retrógrado aproximada, sin resolver Carter) en vez de
+     integrar la ecuación completa en 4D.
+   - Ignora el efecto de la carga sobre la trayectoria del rayo por completo
+     en modo Visual (sólo afecta el tamaño del horizonte, vía las fórmulas
+     exactas) — coincide con la observación del usuario de que ese efecto es
+     casi invisible de todas formas.
+   Trade-off explícito: se pierde precisión pixel-perfect muy cerca de la
+   esfera de fotones a cambio de robustez total y velocidad — pero nada del
+   trabajo riguroso se pierde, queda intacto y seleccionable. PR propia, no
+   parte de otro ítem — todavía no se diseñó la fórmula exacta del sesgo de
+   frame dragging ni el nombre/UI del selector.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

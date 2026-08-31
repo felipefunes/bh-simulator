@@ -125,7 +125,7 @@ describe('traceSchwarzschildRay', () => {
     it('reports a diskHit at the expected radius when the disk bounds contain the crossing', () => {
       const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
         maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 6, outerRadius: 60 },
+        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfAngle: 0 },
       })
 
       expect(result.diskHit).toBeDefined()
@@ -137,7 +137,7 @@ describe('traceSchwarzschildRay', () => {
     it('falls through to a normal escape when the crossing radius is outside the disk bounds', () => {
       const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
         maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 15, outerRadius: 60 },
+        disk: { e1, e2, innerRadius: 15, outerRadius: 60, halfAngle: 0 },
       })
 
       expect(result.diskHit).toBeUndefined()
@@ -150,6 +150,25 @@ describe('traceSchwarzschildRay', () => {
       })
 
       expect(result.diskHit).toBeUndefined()
+    })
+
+    it('with a thick disk, hits a face offset from the exact equatorial plane', () => {
+      const thin = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
+        maxRadius: 2000,
+        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfAngle: 0 },
+      })
+      const thick = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
+        maxRadius: 2000,
+        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfAngle: 0.2 },
+      })
+
+      expect(thin.diskHit).toBeDefined()
+      expect(thick.diskHit).toBeDefined()
+      // The ray approaches from above (camera y=20 > 0), so it should hit
+      // the *upper* face first — farther out along the ray than the thin
+      // disk's exact-midplane crossing, and off the plane by ~radius·sin(halfAngle).
+      expect(thick.diskHit!.position[1]).toBeGreaterThan(0.1)
+      expect(Math.abs(thick.diskHit!.position[1])).toBeCloseTo(thick.diskHit!.radius * Math.sin(0.2), 1)
     })
   })
 })

@@ -1,6 +1,32 @@
 import { add, scale, type Vec3 } from './vec3'
 
 /**
+ * Checks one segment of a ray's step for a crossing of one face of the
+ * disk's slab (world-space y = faceSign · r · sinHalfAngle — the two faces
+ * of the disk, or exactly y=0 for a zero-thickness disk) within
+ * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
+ * The threshold is evaluated at each point's own r (approximated as linear
+ * across the segment, same caveat as everywhere else this file interpolates).
+ */
+function checkDiskBoundaryY(
+  aR: number, aPhi: number, aY: number,
+  bR: number, bPhi: number, bY: number,
+  faceSign: number,
+  sinHalfAngle: number,
+  innerRadius: number,
+  outerRadius: number,
+): { radius: number; phi: number } | null {
+  const aG = aY - faceSign * aR * sinHalfAngle
+  const bG = bY - faceSign * bR * sinHalfAngle
+  if (aG * bG >= 0) return null
+  const fraction = aG / (aG - bG)
+  const radius = aR + fraction * (bR - aR)
+  if (radius < innerRadius || radius > outerRadius) return null
+  const phi = aPhi + fraction * (bPhi - aPhi)
+  return { radius, phi }
+}
+
+/**
  * World-space basis for the ray's fixed orbital plane (e1 = initial radial
  * direction, e2 = initial tangential direction) plus the disk's radial
  * bounds — everything traceSchwarzschildRay needs to reconstruct 3D
@@ -13,6 +39,14 @@ export interface DiskBounds {
   e2: Vec3
   innerRadius: number
   outerRadius: number
+  /**
+   * Angular half-thickness (radians) of the disk around the equatorial
+   * (world-space y=0) plane — see kerrLensing.ts's DiskBounds for the
+   * rationale. Expressed here as a world-space y threshold of r·sin(halfAngle)
+   * at a given radius r, since this tracer works in world-space y rather
+   * than θ directly. 0 reproduces the original zero-thickness plane.
+   */
+  halfAngle: number
 }
 
 export interface RayOutcome {
@@ -135,27 +169,30 @@ export function traceSchwarzschildRay(
       const phiEnd = prevPhi + dPhi
       const newR = 1 / u
 
-      const points: readonly [number, number][] = [
+      const pointsRPhi: readonly [number, number][] = [
         [prevR, prevPhi],
         [r2, phiMid],
         [r3, phiMid],
         [r4, phiEnd],
         [newR, phiEnd],
       ]
+      const points = pointsRPhi.map(([pr, pphi]): readonly [number, number, number] => [
+        pr,
+        pphi,
+        pr * (Math.cos(pphi) * disk.e1[1] + Math.sin(pphi) * disk.e2[1]),
+      ])
+      const sinHalfAngle = Math.sin(disk.halfAngle)
 
       for (let i = 1; i < points.length; i++) {
-        const [aR, aPhi] = points[i - 1]
-        const [bR, bPhi] = points[i]
-        const yPrev = aR * (Math.cos(aPhi) * disk.e1[1] + Math.sin(aPhi) * disk.e2[1])
-        const yNew = bR * (Math.cos(bPhi) * disk.e1[1] + Math.sin(bPhi) * disk.e2[1])
-        if (yPrev * yNew < 0) {
-          const fraction = yPrev / (yPrev - yNew)
-          const hitR = aR + fraction * (bR - aR)
-          if (hitR >= disk.innerRadius && hitR <= disk.outerRadius) {
-            const hitPhi = aPhi + fraction * (bPhi - aPhi)
-            const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
-            return { captured: false, diskHit: { radius: hitR, position } }
-          }
+        const [aR, aPhi, aY] = points[i - 1]
+        const [bR, bPhi, bY] = points[i]
+        const hit =
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, 1, sinHalfAngle, disk.innerRadius, disk.outerRadius) ??
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, -1, sinHalfAngle, disk.innerRadius, disk.outerRadius)
+        if (hit) {
+          const { radius: hitR, phi: hitPhi } = hit
+          const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
+          return { captured: false, diskHit: { radius: hitR, position } }
         }
       }
     }

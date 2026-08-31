@@ -1,8 +1,36 @@
 import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec3'
 
+/**
+ * Checks one segment of a ray's step for a crossing of one disk boundary
+ * (θ = boundaryTheta — either π/2 − halfAngle or π/2 + halfAngle, the two
+ * faces of the disk's slab, or π/2 itself for a zero-thickness disk) within
+ * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
+ */
+function checkDiskBoundary(
+  aR: number, aTheta: number, aPhi: number,
+  bR: number, bTheta: number, bPhi: number,
+  boundaryTheta: number,
+  innerRadius: number,
+  outerRadius: number,
+): { radius: number; theta: number; phi: number } | null {
+  if ((aTheta - boundaryTheta) * (bTheta - boundaryTheta) >= 0) return null
+  const fraction = (boundaryTheta - aTheta) / (bTheta - aTheta)
+  const radius = aR + fraction * (bR - aR)
+  if (radius < innerRadius || radius > outerRadius) return null
+  const phi = aPhi + fraction * (bPhi - aPhi)
+  return { radius, theta: boundaryTheta, phi }
+}
+
 export interface DiskBounds {
   innerRadius: number
   outerRadius: number
+  /**
+   * Angular half-thickness (radians) of the disk around the equatorial
+   * plane (θ = π/2 ± halfAngle), so the disk reads as a real 3D slab —
+   * visible edge-on, not just an infinitesimal plane that vanishes when
+   * viewed exactly side-on. 0 reproduces the original zero-thickness plane.
+   */
+  halfAngle: number
 }
 
 export interface KerrRayOutcome {
@@ -269,17 +297,29 @@ export function traceKerrRay(
         [r, theta, phi],
       ]
 
+      // The disk is a slab of angular half-thickness disk.halfAngle around
+      // the equatorial plane, not an infinitesimal plane — so it has two
+      // faces (θ = π/2 ∓ halfAngle) rather than one, and a ray entering
+      // from either side hits whichever it reaches first. halfAngle = 0
+      // collapses both to exactly π/2, reproducing the original plane.
+      const upperFace = HALF_PI - disk.halfAngle
+      const lowerFace = HALF_PI + disk.halfAngle
+
       for (let i = 1; i < points.length; i++) {
         const [aR, aTheta, aPhi] = points[i - 1]
         const [bR, bTheta, bPhi] = points[i]
-        if ((aTheta - HALF_PI) * (bTheta - HALF_PI) < 0) {
-          const fraction = (HALF_PI - aTheta) / (bTheta - aTheta)
-          const hitRadius = aR + fraction * (bR - aR)
-          if (hitRadius >= disk.innerRadius && hitRadius <= disk.outerRadius) {
-            const hitPhi = aPhi + fraction * (bPhi - aPhi)
-            const position = add(scale(xRef, hitRadius * Math.cos(hitPhi)), scale(yRef, hitRadius * Math.sin(hitPhi)))
-            return { captured: false, diskHit: { radius: hitRadius, position } }
-          }
+        const hit =
+          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, upperFace, disk.innerRadius, disk.outerRadius) ??
+          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, lowerFace, disk.innerRadius, disk.outerRadius)
+        if (hit) {
+          const sinHitTheta = Math.sin(hit.theta)
+          const cosHitTheta = Math.cos(hit.theta)
+          const direction = add(
+            add(scale(xRef, sinHitTheta * Math.cos(hit.phi)), scale(yRef, sinHitTheta * Math.sin(hit.phi))),
+            scale(spinAxis, cosHitTheta),
+          )
+          const position = scale(direction, hit.radius)
+          return { captured: false, diskHit: { radius: hit.radius, position } }
         }
       }
     }
