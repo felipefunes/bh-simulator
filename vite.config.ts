@@ -4,4 +4,26 @@ import { defineConfig } from 'vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // The three.js vendor chunk below is irreducibly >500kB on its own —
+    // this just stops the build from warning about a split that's already
+    // the intended fix, not a size we're failing to control.
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        // three.js + r3f/drei dominate the bundle and change far less often
+        // than the app's own code — splitting them into their own chunk
+        // lets browsers cache that chunk across deploys that only touch
+        // app code, instead of invalidating everything on every release.
+        manualChunks(id) {
+          if (
+            id.includes('node_modules/three') ||
+            id.includes('node_modules/@react-three')
+          ) {
+            return 'three'
+          }
+        },
+      },
+    },
+  },
 })

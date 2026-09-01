@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { classify, isNakedSingularity, type BlackHoleClass } from '../../physics/metric'
 import type { QualityLevel } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
@@ -30,9 +31,24 @@ export function Sidebar() {
 
   const params = useBlackHoleParams()
   const naked = isNakedSingularity(params)
+  const [isOpen, setIsOpen] = useState(false)
 
   return (
-    <aside className="sidebar">
+    <>
+      <button
+        type="button"
+        className="sidebar__mobile-toggle"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((open) => !open)}
+      >
+        {isOpen ? 'Cerrar' : 'Controles'}
+      </button>
+
+      {isOpen && (
+        <div className="sidebar__backdrop" onClick={() => setIsOpen(false)} aria-hidden="true" />
+      )}
+
+      <aside className={isOpen ? 'sidebar sidebar--open' : 'sidebar'}>
       <h1 className="sidebar__title">Black Hole Simulator</h1>
       <p className="sidebar__subtitle">
         Simulación interactiva de un agujero negro: masa, spin y carga eléctrica,
@@ -126,6 +142,7 @@ export function Sidebar() {
         más rendimiento en "Baja") y el pixel ratio del render — útil en GPUs
         modestas o si el navegador se siente forzado, especialmente con spin alto.
       </p>
-    </aside>
+      </aside>
+    </>
   )
 }
