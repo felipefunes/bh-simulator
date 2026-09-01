@@ -125,7 +125,7 @@ describe('traceSchwarzschildRay', () => {
     it('reports a diskHit at the expected radius when the disk bounds contain the crossing', () => {
       const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
         maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfThickness: 0 },
+        disk: { e1, e2, innerRadius: 6, outerRadius: 60 },
       })
 
       expect(result.diskHit).toBeDefined()
@@ -137,7 +137,7 @@ describe('traceSchwarzschildRay', () => {
     it('falls through to a normal escape when the crossing radius is outside the disk bounds', () => {
       const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
         maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 15, outerRadius: 60, halfThickness: 0 },
+        disk: { e1, e2, innerRadius: 15, outerRadius: 60 },
       })
 
       expect(result.diskHit).toBeUndefined()
@@ -150,48 +150,6 @@ describe('traceSchwarzschildRay', () => {
       })
 
       expect(result.diskHit).toBeUndefined()
-    })
-
-    it('detects a diskHit for a ray whose y sits inside the thickness band far outside the radial bounds, only reaching them later (regression: "two disks with a gap")', () => {
-      // Camera and target share the same y (0.3, well inside halfThickness
-      // =0.5) — this ray's y stays ~constant near 0.3 for its whole path, so
-      // it's already inside the Y-band from r0=45 (well outside
-      // [innerRadius=6, outerRadius=20]), long before its radius shrinks
-      // into bounds. A per-face sign-change check (the version this
-      // replaced) never sees a boundary crossed at all, since y never
-      // approaches ±halfThickness from outside it — this is exactly the gap
-      // the user reported as looking like "two disks" with empty space
-      // between them at a near-edge-on camera angle.
-      const grazing = setup([0, 0.3, 45], normalize(sub([0, 0.3, 10], [0, 0.3, 45])))
-      const result = traceSchwarzschildRay({ mass, horizonRadius }, grazing.r0, grazing.rdRadial, grazing.rdTangential, {
-        maxRadius: 2000,
-        disk: { e1: grazing.e1, e2: grazing.e2, innerRadius: 6, outerRadius: 20, halfThickness: 0.5 },
-      })
-
-      expect(result.diskHit).toBeDefined()
-    })
-
-    it('with a thick disk, hits a face offset from the exact equatorial plane', () => {
-      const thin = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
-        maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfThickness: 0 },
-      })
-      const thick = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangential, {
-        maxRadius: 2000,
-        disk: { e1, e2, innerRadius: 6, outerRadius: 60, halfThickness: 0.5 },
-      })
-
-      expect(thin.diskHit).toBeDefined()
-      expect(thick.diskHit).toBeDefined()
-      // The ray approaches from above (camera y=20 > 0), so it should enter
-      // through the upper half of the slab, somewhere in (0, halfThickness]
-      // — this is an entry-into-the-region check rather than an exact
-      // boundary interpolation (see isInsideDiskSlab's doc comment for why
-      // that tradeoff fixes a worse bug: rays that silently entered the
-      // Y-band before their radius reached the disk's bounds).
-      expect(thick.diskHit!.position[1]).toBeGreaterThan(0)
-      expect(thick.diskHit!.position[1]).toBeLessThanOrEqual(0.5)
-      expect(thick.diskHit!.position[1]).not.toBeCloseTo(thin.diskHit!.position[1], 2)
     })
   })
 })

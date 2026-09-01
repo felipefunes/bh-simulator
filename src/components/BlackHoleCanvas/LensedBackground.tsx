@@ -15,23 +15,13 @@ const SPHERE_RADIUS = 500
 // theta/phi for every pixel regardless of screen position, collapsing the
 // entire lensed background to a single sampled texture color.
 const MAX_RAY_RADIUS = 400
-// Disk half-thickness (roadmap: "un poco de espesor" — real accretion disks
-// aren't infinitesimally thin, and a real plane is invisible when viewed
-// exactly edge-on, which looked wrong), as a constant *fraction of
-// innerRadius* rather than a fixed length — so it scales with the disk's
-// own size across different mass/spin combinations, the same way
-// innerRadius/outerRadius already do.
-//
-// A first version used a fixed *angle* from the equator (so the slab's
-// physical thickness grew proportionally with r, i.e. a literal cone from
-// the origin) instead of a constant height. Visual QA at a near-edge-on
-// camera angle showed why that was wrong: under the disk's own strong
-// lensing near the shadow, that flaring cone turned into a dramatic
-// hourglass/"hi-hat" shape spanning most of the frame, not a subtly-thick
-// disk. A constant physical half-thickness (this version, computed from
-// innerRadius where params.disk is turned into a uniform, below) keeps the
-// disk a real flat slab at every radius instead of flaring open.
-const DISK_HALF_THICKNESS_RATIO = 0.15
+// The disk briefly had physical thickness (roadmap: "un poco de espesor")
+// via a constant half-thickness fraction of innerRadius — see git history
+// (removed after it turned out to be the tipping point for GPU cost at high
+// spin/near-edge-on views; a per-step branch on top of Kerr's fixed
+// 6000-step integration adds up across the whole frame — see
+// checkDiskSegment's doc comment below and KERR_STEPS's in
+// renderQuality.ts). Reverted to the original infinitesimally-thin plane.
 // 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
 // angle without bound near the photon sphere (in the limit, a full ring of
 // sky maps to a single point), so any raster texture's 8-bit gradient steps
@@ -194,10 +184,6 @@ const FRAGMENT_SHADER = /* glsl */ `
   // has 0 < innerRadius < outerRadius.
   uniform float uDiskInnerRadius;
   uniform float uDiskOuterRadius;
-  // Constant half-thickness (same length units as mass/radius) of the disk
-  // slab around the equatorial plane — see physics/kerrLensing.ts's
-  // DiskBounds for the rationale.
-  uniform float uDiskHalfThickness;
   // Elapsed time (seconds) and a tileable procedural noise texture, for the
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
@@ -310,41 +296,34 @@ const FRAGMENT_SHADER = /* glsl */ `
     return vec2(phi / (2.0 * PI) + 0.5, theta / PI);
   }
 
-  // Checks one segment of a Schwarzschild ray's step for entry into the
-  // disk's slab (within [innerRadius, outerRadius] AND within halfThickness
-  // of the equatorial plane, world-space y=0 — a constant height, not one
-  // that grows with r) — see traceSchwarzschild's use of this (four segments
-  // per step, across its RK4 stage points, mirroring checkDiskSegment for
-  // Kerr's θ) for why a single per-step endpoint check isn't enough.
+  // Checks one segment of a Schwarzschild ray's step for a crossing of the
+  // disk's plane (world-space y=0) within [innerRadius, outerRadius] — see
+  // traceSchwarzschild's use of this (four segments per step, across its RK4
+  // stage points, mirroring checkDiskSegment for Kerr's θ) for why a single
+  // per-step endpoint check isn't enough.
   //
-  // A first version checked each face (world-y = ∓halfThickness) via a sign
-  // change, gating the radius-bounds check to that same step — which misses
-  // near-edge-on rays: they can enter the thin Y-band while still far
-  // outside [innerRadius, outerRadius], and once their radius later shrinks
-  // into bounds there's no fresh sign change to trigger on. Visual QA showed
-  // this as a visible gap between what looked like "two disks" instead of
-  // one filled slab. Checking the combined region as a single inside/outside
-  // predicate, and triggering on its false→true transition, fixes that.
-  //
-  // An even earlier version made the threshold r·sin(halfAngle) — a fixed
-  // *angle* from the equator (a cone from the origin) rather than a fixed
-  // height. Visual QA at a near-edge-on camera angle showed why that was
-  // wrong too: a cone's half-thickness grows without bound with r, and under
-  // the disk's own strong lensing near the shadow that turned into a
-  // dramatic hourglass/"hi-hat" shape spanning most of the frame.
+  // The disk briefly had physical thickness (two faces, a filled slab
+  // instead of an infinitesimal plane) — reverted after it turned out to be
+  // the tipping point for GPU cost at high spin/near-edge-on views (an
+  // already load-bearing constraint here, see KERR_STEPS's doc comment in
+  // renderQuality.ts): every extra per-step branch on top of Kerr's fixed
+  // 6000-step integration adds up across the whole frame. Given this is
+  // fundamentally an educational/visual simulator, a flat disk that renders
+  // smoothly beats a thick one that doesn't render at all.
   bool checkDiskSegmentY(
     float aR, float aPhi, float bR, float bPhi,
-    float e1y, float e2y, float halfThickness,
+    float e1y, float e2y,
     float innerRadius, float outerRadius,
     out float hitRadius, out float hitPhi
   ) {
     float ay = aR * (cos(aPhi) * e1y + sin(aPhi) * e2y);
     float by = bR * (cos(bPhi) * e1y + sin(bPhi) * e2y);
-    bool aInside = aR >= innerRadius && aR <= outerRadius && abs(ay) <= halfThickness;
-    bool bInside = bR >= innerRadius && bR <= outerRadius && abs(by) <= halfThickness;
-    if (aInside || !bInside) return false;
-    hitRadius = bR;
-    hitPhi = bPhi;
+    if (ay * by >= 0.0) return false;
+    float fraction = ay / (ay - by);
+    float r = aR + fraction * (bR - aR);
+    if (r < innerRadius || r > outerRadius) return false;
+    hitRadius = r;
+    hitPhi = aPhi + fraction * (bPhi - aPhi);
     return true;
   }
 
@@ -416,10 +395,10 @@ const FRAGMENT_SHADER = /* glsl */ `
         float hitR;
         float hitPhi;
         if (
-          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskHalfThickness, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -470,48 +449,37 @@ const FRAGMENT_SHADER = /* glsl */ `
   // straight from the already-smooth, already-accumulated phi sidesteps
   // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
   // handles phi being outside [-π, π] for free.
-  // Checks one segment of a Kerr ray's step for entry into the disk's slab
-  // (within [innerRadius, outerRadius] AND within halfThickness of the
-  // equatorial plane; y = r·cosθ since the spin axis is world Y) — see
-  // traceKerr's use of this (four segments per step, across its RK4 stage
-  // points) for why a single per-step endpoint check isn't enough. Takes
-  // explicit points rather than an array to stay clear of GLSL ES 1.00's
-  // restrictions on dynamically-indexed arrays.
+  // Checks one segment of a Kerr ray's step for a crossing of the equatorial
+  // plane (θ=π/2, y = r·cosθ since the spin axis is world Y) within
+  // [innerRadius, outerRadius] — see traceKerr's use of this (four segments
+  // per step, across its RK4 stage points) for why a single per-step
+  // endpoint check isn't enough. Takes explicit points rather than an array
+  // to stay clear of GLSL ES 1.00's restrictions on dynamically-indexed
+  // arrays.
   //
-  // A first version checked each face (world-y = ∓halfThickness) via a sign
-  // change, gating the radius-bounds check to that same step — which misses
-  // near-edge-on rays: they can enter the thin Y-band while still far
-  // outside [innerRadius, outerRadius], and once their radius later shrinks
-  // into bounds there's no fresh sign change to trigger on. Visual QA showed
-  // this as a visible gap between what looked like "two disks" instead of
-  // one filled slab. Checking the combined region as a single inside/outside
-  // predicate, and triggering on its false→true transition, fixes that.
-  //
-  // An even earlier version made the threshold a fixed *angle* from the
-  // equator (θ = π/2 ∓ halfAngle, a cone from the origin) rather than a
-  // fixed height. Visual QA at a near-edge-on camera angle showed why that
-  // was wrong too: a cone's half-thickness grows without bound with r, and
-  // under the disk's own strong lensing near the shadow that turned into a
-  // dramatic hourglass/"hi-hat" shape spanning most of the frame. The hit
-  // position is reconstructed from (r, y, φ) directly — ρ = √(r²−y²) is the
-  // in-plane (xRef/yRef) distance from the spin axis — rather than via θ,
-  // since only y (exact) and r (this segment's endpoint) are needed, not θ
-  // itself.
+  // The disk briefly had physical thickness (two faces, a filled slab
+  // instead of an infinitesimal plane) — reverted after it turned out to be
+  // the tipping point for GPU cost at high spin/near-edge-on views (an
+  // already load-bearing constraint here, see KERR_STEPS's doc comment in
+  // renderQuality.ts): every extra per-step branch on top of Kerr's fixed
+  // 6000-step integration adds up across the whole frame. Given this is
+  // fundamentally an educational/visual simulator, a flat disk that renders
+  // smoothly beats a thick one that doesn't render at all.
   bool checkDiskSegment(
     float aR, float aTheta, float aPhi,
     float bR, float bTheta, float bPhi,
-    float halfThickness,
     vec3 xRef, vec3 yRef, float innerRadius, float outerRadius,
     out float hitRadius, out vec3 hitPosition
   ) {
     float ay = aR * cos(aTheta);
     float by = bR * cos(bTheta);
-    bool aInside = aR >= innerRadius && aR <= outerRadius && abs(ay) <= halfThickness;
-    bool bInside = bR >= innerRadius && bR <= outerRadius && abs(by) <= halfThickness;
-    if (aInside || !bInside) return false;
-    float rho = sqrt(max(0.0, bR * bR - by * by));
-    hitRadius = bR;
-    hitPosition = rho * cos(bPhi) * xRef + rho * sin(bPhi) * yRef + by * SPIN_AXIS;
+    if (ay * by >= 0.0) return false;
+    float fraction = ay / (ay - by);
+    float r = aR + fraction * (bR - aR);
+    if (r < innerRadius || r > outerRadius) return false;
+    float phi = aPhi + fraction * (bPhi - aPhi);
+    hitRadius = r;
+    hitPosition = r * cos(phi) * xRef + r * sin(phi) * yRef;
     return true;
   }
 
@@ -663,10 +631,10 @@ const FRAGMENT_SHADER = /* glsl */ `
         float hitR;
         vec3 hitPos;
         if (
-          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r4, th4, phi4, r, theta, phi, uDiskHalfThickness, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
+          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
+          checkDiskSegment(r4, th4, phi4, r, theta, phi, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -821,7 +789,6 @@ export function LensedBackground({
       uKerrDTau: { value: KERR_D_TAU },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
-      uDiskHalfThickness: { value: disk ? DISK_HALF_THICKNESS_RATIO * disk.innerRadius : 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
     }),
@@ -845,7 +812,6 @@ export function LensedBackground({
     material.uniforms.uKerrDTau.value = KERR_D_TAU
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
-    material.uniforms.uDiskHalfThickness.value = disk ? DISK_HALF_THICKNESS_RATIO * disk.innerRadius : 0
   })
 
   return (

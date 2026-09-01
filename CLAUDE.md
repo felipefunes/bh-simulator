@@ -462,68 +462,51 @@ clasificación del caso) de forma aislada del render.
        delicado, no con el bug original. Repetido con carga (Reissner–Nordström)
        en "Baja": mismo resultado limpio, confirmando que el fix cubre el
        integrador Kerr–Newman completo (no sólo el caso de spin puro).
-   - **Espesor del disco**, pedido explícito del usuario tras revisar (los discos
-     reales no son un plano infinitesimal, y uno lo es se vuelve invisible visto
-     exactamente de canto). El chequeo de cruce, que antes buscaba θ=π/2 exacto
-     (Kerr) o y=0 exacto (Schwarzschild), ahora busca la entrada a un *slab* —
-     dos caras en vez de una — dentro de `[innerRadius, outerRadius]`.
-     - Primera versión (buggy): el slab se definía por ángulo fijo desde el
-       origen (`disk.halfAngle`, caras en π/2∓halfAngle en Kerr, ±r·sin(halfAngle)
-       en el y de Schwarzschild). Reportado por el usuario como **"se nos
-       convirtió en un hi-hat lol"**, con captura mostrando el disco, visto casi
-       exactamente de canto, como dos conos que se encuentran en un punto — un
-       reloj de arena, no un disco delgado. Causa: un umbral angular es
-       literalmente un cono cuyo espesor físico (r·sin(halfAngle)) crece sin
-       límite con r; bajo la lente gravitacional propia del disco cerca de la
-       sombra, visto casi de canto, ese cono se estira hasta ocupar casi todo el
-       cuadro en vez de verse como un borde sutil.
-     - Fix: el slab pasó a definirse por espesor físico *constante*
-       (`disk.halfThickness`, en `DiskBounds` de ambos módulos — 0 reproduce el
-       plano original), no por ángulo — dos caras a altura mundial
-       ±halfThickness (comparado contra r·cosθ en Kerr, contra y en Schwarzschild
-       ya que ese tracer ya trabaja en y del mundo) en vez de ±r·sin(halfAngle).
-       Así el disco es un slab plano de verdad a cualquier radio, en vez de un
-       cono que se abre. La reconstrucción de posición en Kerr, al ya no conocer
-       θ en el punto de cruce (sólo y exacto y r interpolado), pasa por
-       ρ=√(r²−y²) (distancia al eje de spin en el plano) en vez de sinθ/cosθ;
-       en Schwarzschild no hizo falta cambiar nada — `r·cosφ·e1 + r·senφ·e2` ya
-       reconstruye el punto 3D exacto para cualquier y. `DISK_HALF_THICKNESS_RATIO
-       = 0.15` en `LensedBackground.tsx`, aplicado como fracción de
-       `innerRadius` (espesor físico fijo por sesión, no un ángulo) — un valor
-       fijo, no expuesto en el sidebar por ahora. Testeado en vitest (ambos
-       módulos, casos de espesor 0 y >0) antes de portar a GLSL, mismo patrón de
-       siempre. Verificado en el navegador reproduciendo ángulos cercanos a de
-       canto (incluyendo el mismo tipo de encuadre del reporte original): borde
-       del disco visible como una franja delgada consistente, sin forma de
-       reloj de arena/hi-hat a ningún ángulo probado.
-     - **Segundo bug, tras el fix anterior**: de canto, el disco se veía como
-       **dos discos separados con un espacio vacío entre medio** en vez de un
-       slab relleno — reportado por el usuario como "tenemos ese espacio aún
-       entre dos discos". Causa: el chequeo de cruce (`isInsideDiskSlab`)
-       exige que el radio Y el espesor se satisfagan *en el mismo paso* de
-       integración — pero un rayo casi de canto puede entrar a la banda de
-       espesor (|y|≤halfThickness) muy lejos del agujero, con el radio
-       todavía fuera de `[innerRadius, outerRadius]`, y recién entrar en
-       radio muchos pasos después, sin que haya un nuevo cruce de cara ese
-       paso posterior — ese rayo nunca se registra como hit, cae al fondo, y
-       aparece como el hueco vacío. Los rayos que SÍ se detectan (los que
-       cruzan ambas condiciones a la vez) forman las dos franjas delgadas que
-       bordean el hueco. Fix: en vez de exigir el cruce de una cara específica
-       con el radio ya válido en el mismo instante, se chequea la región
-       combinada (radio Y espesor) como un solo predicado, y se dispara en su
-       transición falso→verdadero — así se detecta el paso de entrada sin
-       importar cuál de las dos condiciones sea la que recién se cumple. Caso
-       aparte: con espesor exactamente 0 (el plano infinitesimal original,
-       usado sólo en tests), "estar dentro de la banda" degenera a "y es
-       exactamente 0", algo que un muestreo continuo casi nunca toca — pero
-       un plano sin espesor tampoco puede tener el problema de "quedarse
-       adentro varios pasos", así que ese caso sigue usando el cruce por
-       cambio de signo de siempre (`checkDiskPlaneCrossing`), sin necesidad
-       del nuevo chequeo. Testeado en vitest con un caso específico que
-       reproduce el bug (cámara y objetivo con la misma altura y, dentro del
-       espesor, a un radio bien fuera de `[innerRadius, outerRadius]`, que
-       sólo entra en rango muchos pasos después) en ambos módulos
-       (`lensing.test.ts`/`kerrLensing.test.ts`) antes de portar a GLSL.
+   - **Espesor del disco — intentado, revertido**, pedido explícito del
+     usuario tras revisar (los discos reales no son un plano infinitesimal, y
+     uno lo es se vuelve invisible visto exactamente de canto). El chequeo de
+     cruce, que buscaba θ=π/2 exacto (Kerr) o y=0 exacto (Schwarzschild), pasó
+     a buscar la entrada a un *slab* — dos caras en vez de una — dentro de
+     `[innerRadius, outerRadius]`. Esto pasó por tres rondas de bugs
+     encontrados en review visual antes de terminar revertido por completo:
+     - *Primera versión (buggy)*: slab por ángulo fijo desde el origen
+       (`disk.halfAngle`, un cono desde el origen). Reportado como **"se nos
+       convirtió en un hi-hat lol"** — de canto, el cono (cuyo espesor físico
+       crece sin límite con r) se estiraba bajo la lente propia del disco
+       hasta ocupar casi todo el cuadro, como dos conos que se encuentran en
+       un punto.
+     - *Fix*: espesor físico *constante* (`disk.halfThickness`, altura mundial
+       fija en vez de ángulo) — el disco pasó a ser un slab plano de verdad a
+       cualquier radio.
+     - *Segundo bug*: de canto, el disco se veía como **dos discos separados
+       con un espacio vacío entre medio** — "tenemos ese espacio aún entre dos
+       discos". Causa: el chequeo de cruce exigía que radio y espesor se
+       satisficieran *en el mismo paso* de integración; un rayo casi de canto
+       puede entrar a la banda de espesor muy lejos del agujero (radio aún
+       fuera de bounds) y sólo entrar en radio muchos pasos después, sin un
+       nuevo cruce de cara que dispare el chequeo ese paso posterior — ese
+       rayo nunca se registraba como hit, caía al fondo, y aparecía como el
+       hueco vacío entre los rayos que sí coincidían en ambas condiciones a la
+       vez. Fix: chequear la región combinada (radio Y espesor) como un solo
+       predicado, disparando en su transición falso→verdadero.
+     - **Reversión completa**: arreglado el hueco, el usuario reportó que la
+       performance volvía a colapsar ("volvimos a colapsar con la
+       performance") y propuso volver al disco plano. Diagnóstico: el costo
+       extra por paso que el espesor agrega (evaluar el predicado combinado
+       en cada uno de los pasos de la integración) se suma sobre la
+       integración de Kerr, que ya corre a `KERR_STEPS` fijo y alto (6000, ver
+       PR8 más arriba) precisamente porque *no* se puede bajar sin romper la
+       geometría cerca de la esfera de fotones — cualquier trabajo adicional
+       por paso, multiplicado por 6000 pasos y por cada píxel del frame, es
+       exactamente el tipo de costo que ese diseño ya dejaba poco margen para
+       absorber. Dado que éste es ante todo un simulador educativo/visual (la
+       misma lógica que motivó el ítem 9 del roadmap), un disco plano que
+       renderiza fluido gana sobre uno con espesor que no renderiza en
+       absoluto. Se revirtió por completo a la geometría original (plano
+       infinitesimal, cruce por cambio de signo de y/θ=π/2, sin
+       `halfThickness` en `DiskBounds` de ningún módulo ni en el shader) —
+       ver el historial de git para el detalle completo de las tres rondas de
+       fixes intentadas antes de la reversión.
    - **Textura de flujo rotante**, para recuperar la sensación de giro que se
      perdió al reemplazar las partículas (un disco analítico estacionario y
      simétrico genuinamente no necesita animarse — su patrón de brillo no

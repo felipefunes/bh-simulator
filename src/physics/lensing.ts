@@ -1,55 +1,23 @@
 import { add, scale, type Vec3 } from './vec3'
 
 /**
- * True when a point lies inside the disk's slab: within its radial bounds
- * AND within halfThickness of the equatorial (world-space y=0) plane.
+ * Checks one segment of a ray's step for a crossing of the disk's plane
+ * (world-space y=0) within [innerRadius, outerRadius]. Returns the
+ * interpolated hit radius and φ, or null.
  *
- * A first version checked each face (world-y = ∓halfThickness) via a sign
- * change, gating the radius-bounds check to that same step. That misses
- * near-edge-on rays: they can enter the thin Y-band while still far outside
- * [innerRadius, outerRadius] (grazing rays do this well before reaching the
- * hole), and once their radius later shrinks into bounds there's no fresh
- * sign change to trigger on — the crossing already happened, out of bounds,
- * steps ago. Visual QA showed this as a visible gap between what looked like
- * "two disks" (the rays whose Y-crossing and radius-bounds happened to
- * coincide in the same step) instead of one filled slab. Checking the
- * combined region as a single inside/outside predicate, and triggering on
- * its false→true transition, catches the entry step regardless of which
- * condition — radius or thickness — is the one that becomes newly satisfied.
- *
- * An even earlier version made the threshold r·sin(halfAngle) — a fixed
- * *angle* from the equator (a cone from the origin) rather than a fixed
- * height. Visual QA at a near-edge-on camera angle showed why that was wrong
- * too: a cone's half-thickness grows without bound with r, and under the
- * disk's own strong lensing near the shadow that turned into a dramatic
- * hourglass/"hi-hat" shape spanning most of the frame, not a subtly-thick disk.
+ * The disk briefly had physical thickness (two faces, a filled slab instead
+ * of this infinitesimal plane) — reverted (see git history for the full
+ * saga) after it turned out to be the tipping point for GPU cost at high
+ * spin/near-edge-on views: every extra per-step branch it added compounds
+ * across Kerr's already load-bearing fixed 6000-step integration (see
+ * KERR_STEPS's doc comment in renderQuality.ts) and across every pixel of
+ * the frame. Given this is fundamentally an educational/visual simulator, a
+ * flat disk that renders smoothly beats a thick one that doesn't render at
+ * all.
  */
-function isInsideDiskSlab(
-  r: number,
-  y: number,
-  innerRadius: number,
-  outerRadius: number,
-  halfThickness: number,
-): boolean {
-  return r >= innerRadius && r <= outerRadius && Math.abs(y) <= halfThickness
-}
-
-/**
- * A zero-thickness disk is a genuine edge case for isInsideDiskSlab: "inside
- * the Y-band" degenerates to "y is exactly 0", which a continuously-sampled
- * trajectory essentially never lands on exactly, so the false→true
- * transition it looks for would almost never fire. The reason isInsideDiskSlab
- * needs that transition check at all — a ray can dwell inside the Y-band for
- * many steps while its radius is still out of bounds — doesn't apply here:
- * an infinitesimally thin plane can't be "dwelled inside", only crossed
- * instantaneously. So a zero-thickness disk instead detects the plane
- * crossing directly, the same way this disk check worked before thickness
- * existed at all: a sign change of y itself within the step, interpolated to
- * the exact crossing point and radius.
- */
-function checkDiskPlaneCrossing(
-  aR: number, aY: number, aPhi: number,
-  bR: number, bY: number, bPhi: number,
+function checkDiskCrossing(
+  aR: number, aPhi: number, aY: number,
+  bR: number, bPhi: number, bY: number,
   innerRadius: number,
   outerRadius: number,
 ): { radius: number; phi: number } | null {
@@ -74,13 +42,6 @@ export interface DiskBounds {
   e2: Vec3
   innerRadius: number
   outerRadius: number
-  /**
-   * Constant half-thickness (in the same length units as mass/radius) of
-   * the disk around the equatorial (world-space y=0) plane — see
-   * kerrLensing.ts's DiskBounds and this file's isInsideDiskSlab for the
-   * rationale. 0 reproduces the original zero-thickness plane.
-   */
-  halfThickness: number
 }
 
 export interface RayOutcome {
@@ -215,29 +176,10 @@ export function traceSchwarzschildRay(
         pphi,
         pr * (Math.cos(pphi) * disk.e1[1] + Math.sin(pphi) * disk.e2[1]),
       ])
-      // For halfThickness > 0, a hit is the step where the ray's (r, y)
-      // newly satisfies both the radial bounds and the thickness bound
-      // together — see isInsideDiskSlab's doc comment for why this must be
-      // one combined predicate rather than a per-face crossing gated on
-      // radius at that same instant. For halfThickness = 0 (an
-      // infinitesimal plane), see checkDiskPlaneCrossing's doc comment for
-      // why that case needs a different check instead.
       for (let i = 1; i < points.length; i++) {
         const [aR, aPhi, aY] = points[i - 1]
         const [bR, bPhi, bY] = points[i]
-
-        let hit: { radius: number; phi: number } | null = null
-        if (disk.halfThickness > 0) {
-          if (
-            !isInsideDiskSlab(aR, aY, disk.innerRadius, disk.outerRadius, disk.halfThickness) &&
-            isInsideDiskSlab(bR, bY, disk.innerRadius, disk.outerRadius, disk.halfThickness)
-          ) {
-            hit = { radius: bR, phi: bPhi }
-          }
-        } else {
-          hit = checkDiskPlaneCrossing(aR, aY, aPhi, bR, bY, bPhi, disk.innerRadius, disk.outerRadius)
-        }
-
+        const hit = checkDiskCrossing(aR, aPhi, aY, bR, bPhi, bY, disk.innerRadius, disk.outerRadius)
         if (hit) {
           const position = add(scale(disk.e1, hit.radius * Math.cos(hit.phi)), scale(disk.e2, hit.radius * Math.sin(hit.phi)))
           return { captured: false, diskHit: { radius: hit.radius, position } }
