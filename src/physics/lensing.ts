@@ -1,25 +1,28 @@
 import { add, scale, type Vec3 } from './vec3'
 
 /**
- * Checks one segment of a ray's step for a crossing of one face of the
- * disk's slab (world-space y = faceSign · r · sinHalfAngle — the two faces
- * of the disk, or exactly y=0 for a zero-thickness disk) within
- * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
- * The threshold is evaluated at each point's own r (approximated as linear
- * across the segment, same caveat as everywhere else this file interpolates).
+ * Checks one segment of a ray's step for a crossing of the disk's plane
+ * (world-space y=0) within [innerRadius, outerRadius]. Returns the
+ * interpolated hit radius and φ, or null.
+ *
+ * The disk briefly had physical thickness (two faces, a filled slab instead
+ * of this infinitesimal plane) — reverted (see git history for the full
+ * saga) after it turned out to be the tipping point for GPU cost at high
+ * spin/near-edge-on views: every extra per-step branch it added compounds
+ * across Kerr's already load-bearing fixed 6000-step integration (see
+ * KERR_STEPS's doc comment in renderQuality.ts) and across every pixel of
+ * the frame. Given this is fundamentally an educational/visual simulator, a
+ * flat disk that renders smoothly beats a thick one that doesn't render at
+ * all.
  */
-function checkDiskBoundaryY(
+function checkDiskCrossing(
   aR: number, aPhi: number, aY: number,
   bR: number, bPhi: number, bY: number,
-  faceSign: number,
-  sinHalfAngle: number,
   innerRadius: number,
   outerRadius: number,
 ): { radius: number; phi: number } | null {
-  const aG = aY - faceSign * aR * sinHalfAngle
-  const bG = bY - faceSign * bR * sinHalfAngle
-  if (aG * bG >= 0) return null
-  const fraction = aG / (aG - bG)
+  if (aY * bY >= 0) return null
+  const fraction = aY / (aY - bY)
   const radius = aR + fraction * (bR - aR)
   if (radius < innerRadius || radius > outerRadius) return null
   const phi = aPhi + fraction * (bPhi - aPhi)
@@ -39,14 +42,6 @@ export interface DiskBounds {
   e2: Vec3
   innerRadius: number
   outerRadius: number
-  /**
-   * Angular half-thickness (radians) of the disk around the equatorial
-   * (world-space y=0) plane — see kerrLensing.ts's DiskBounds for the
-   * rationale. Expressed here as a world-space y threshold of r·sin(halfAngle)
-   * at a given radius r, since this tracer works in world-space y rather
-   * than θ directly. 0 reproduces the original zero-thickness plane.
-   */
-  halfAngle: number
 }
 
 export interface RayOutcome {
@@ -181,18 +176,13 @@ export function traceSchwarzschildRay(
         pphi,
         pr * (Math.cos(pphi) * disk.e1[1] + Math.sin(pphi) * disk.e2[1]),
       ])
-      const sinHalfAngle = Math.sin(disk.halfAngle)
-
       for (let i = 1; i < points.length; i++) {
         const [aR, aPhi, aY] = points[i - 1]
         const [bR, bPhi, bY] = points[i]
-        const hit =
-          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, 1, sinHalfAngle, disk.innerRadius, disk.outerRadius) ??
-          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, -1, sinHalfAngle, disk.innerRadius, disk.outerRadius)
+        const hit = checkDiskCrossing(aR, aPhi, aY, bR, bPhi, bY, disk.innerRadius, disk.outerRadius)
         if (hit) {
-          const { radius: hitR, phi: hitPhi } = hit
-          const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
-          return { captured: false, diskHit: { radius: hitR, position } }
+          const position = add(scale(disk.e1, hit.radius * Math.cos(hit.phi)), scale(disk.e2, hit.radius * Math.sin(hit.phi)))
+          return { captured: false, diskHit: { radius: hit.radius, position } }
         }
       }
     }

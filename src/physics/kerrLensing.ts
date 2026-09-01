@@ -1,36 +1,39 @@
 import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec3'
 
 /**
- * Checks one segment of a ray's step for a crossing of one disk boundary
- * (θ = boundaryTheta — either π/2 − halfAngle or π/2 + halfAngle, the two
- * faces of the disk's slab, or π/2 itself for a zero-thickness disk) within
- * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
+ * Checks one segment of a ray's step for a crossing of the equatorial plane
+ * (θ=π/2, y = r·cosθ since the spin axis is world Y) within [innerRadius,
+ * outerRadius]. Returns the interpolated hit radius and φ, or null.
+ *
+ * The disk briefly had physical thickness (two faces, a filled slab instead
+ * of this infinitesimal plane) — reverted (see git history for the full
+ * saga) after it turned out to be the tipping point for GPU cost at high
+ * spin/near-edge-on views: every extra per-step branch it added compounds
+ * across Kerr's already load-bearing fixed 6000-step integration (see
+ * KERR_STEPS's doc comment in renderQuality.ts) and across every pixel of
+ * the frame. Given this is fundamentally an educational/visual simulator, a
+ * flat disk that renders smoothly beats a thick one that doesn't render at
+ * all.
  */
-function checkDiskBoundary(
+function checkDiskCrossing(
   aR: number, aTheta: number, aPhi: number,
   bR: number, bTheta: number, bPhi: number,
-  boundaryTheta: number,
   innerRadius: number,
   outerRadius: number,
-): { radius: number; theta: number; phi: number } | null {
-  if ((aTheta - boundaryTheta) * (bTheta - boundaryTheta) >= 0) return null
-  const fraction = (boundaryTheta - aTheta) / (bTheta - aTheta)
+): { radius: number; phi: number } | null {
+  const aY = aR * Math.cos(aTheta)
+  const bY = bR * Math.cos(bTheta)
+  if (aY * bY >= 0) return null
+  const fraction = aY / (aY - bY)
   const radius = aR + fraction * (bR - aR)
   if (radius < innerRadius || radius > outerRadius) return null
   const phi = aPhi + fraction * (bPhi - aPhi)
-  return { radius, theta: boundaryTheta, phi }
+  return { radius, phi }
 }
 
 export interface DiskBounds {
   innerRadius: number
   outerRadius: number
-  /**
-   * Angular half-thickness (radians) of the disk around the equatorial
-   * plane (θ = π/2 ± halfAngle), so the disk reads as a real 3D slab —
-   * visible edge-on, not just an infinitesimal plane that vanishes when
-   * viewed exactly side-on. 0 reproduces the original zero-thickness plane.
-   */
-  halfAngle: number
 }
 
 export interface KerrRayOutcome {
@@ -230,8 +233,6 @@ export function traceKerrRay(
   const thetaNearPole = Q + cosGuard * cosGuard * (a * a - (L * L) / (sinGuard * sinGuard))
   const isPoleCrossing = thetaNearPole > 0
 
-  const HALF_PI = Math.PI / 2
-
   for (let step = 0; step < maxSteps; step++) {
     const prevR = r
     const prevTheta = theta
@@ -297,28 +298,14 @@ export function traceKerrRay(
         [r, theta, phi],
       ]
 
-      // The disk is a slab of angular half-thickness disk.halfAngle around
-      // the equatorial plane, not an infinitesimal plane — so it has two
-      // faces (θ = π/2 ∓ halfAngle) rather than one, and a ray entering
-      // from either side hits whichever it reaches first. halfAngle = 0
-      // collapses both to exactly π/2, reproducing the original plane.
-      const upperFace = HALF_PI - disk.halfAngle
-      const lowerFace = HALF_PI + disk.halfAngle
-
       for (let i = 1; i < points.length; i++) {
         const [aR, aTheta, aPhi] = points[i - 1]
         const [bR, bTheta, bPhi] = points[i]
-        const hit =
-          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, upperFace, disk.innerRadius, disk.outerRadius) ??
-          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, lowerFace, disk.innerRadius, disk.outerRadius)
+        const hit = checkDiskCrossing(aR, aTheta, aPhi, bR, bTheta, bPhi, disk.innerRadius, disk.outerRadius)
         if (hit) {
-          const sinHitTheta = Math.sin(hit.theta)
-          const cosHitTheta = Math.cos(hit.theta)
-          const direction = add(
-            add(scale(xRef, sinHitTheta * Math.cos(hit.phi)), scale(yRef, sinHitTheta * Math.sin(hit.phi))),
-            scale(spinAxis, cosHitTheta),
-          )
-          const position = scale(direction, hit.radius)
+          // At θ=π/2 exactly, ρ=r (the reconstructed point lies fully in the
+          // xRef/yRef plane, no spinAxis component).
+          const position = add(scale(xRef, hit.radius * Math.cos(hit.phi)), scale(yRef, hit.radius * Math.sin(hit.phi)))
           return { captured: false, diskHit: { radius: hit.radius, position } }
         }
       }
