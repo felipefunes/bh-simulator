@@ -365,17 +365,173 @@ clasificación del caso) de forma aislada del render.
      trade-off es honesto, no gratis) mientras que "Alta" se ve tan limpio
      como (o mejor que) el default anterior — confirma que el control tiene
      efecto real, no es un placeholder.
-8. Lensear el disco de acreción. Hoy el disco es geometría de partículas opaca,
-   separada del shader de lente — no pasa por el raytracer, así que no se deforma
-   ni aparece duplicado arriba/abajo del agujero (el look clásico de la foto de
-   M87/Sgr A*, o de Interstellar). Para lograrlo hace falta que el mismo rayo
-   curvado del shader detecte cuándo cruza el plano del disco (z=0 en coordenadas
-   del disco, entre `innerRadius` y `outerRadius`) durante la integración, y
-   samplee el color/temperatura del disco ahí en vez de (o además de) la textura
-   de fondo — probablemente usando un mapa de temperatura precalculado en vez de
-   volver a generar 8000 partículas dentro del shader. Pedido explícito del
-   usuario tras revisar el PR 6 (el disco "queda mediocre" al no deformarse con
-   el resto de la imagen).
+8. ✅ **Lensear el disco de acreción**. Reemplazo completo (decisión explícita del
+   usuario, no la opción "en capas" que hubiera mantenido el disco de partículas
+   sin deformar para la vista directa): se eliminó `AccretionDisk.tsx` (las 8000
+   partículas) por completo. Ahora el mismo rayo curvado de `traceSchwarzschild`/
+   `traceKerr` detecta, en cada paso de la integración, un cruce del plano
+   ecuatorial (θ=π/2 en Kerr; signo de la componente y de la posición 3D
+   reconstruida vía la base e1/e2 del propio rayo, en Schwarzschild — ver el
+   comentario de `traceSchwarzschildRay` en `physics/lensing.ts`) dentro de
+   `[innerRadius, outerRadius]`, interpola linealmente el radio/φ del cruce, y
+   si cae dentro del disco corta la integración ahí (igual que una captura) en
+   vez de seguir hacia la textura de fondo. El color en ese punto es completamente
+   analítico (perfil de temperatura de Shakura–Sunyaev + blackbody + Doppler,
+   las mismas fórmulas de `physics/accretionDisk.ts`, portadas a GLSL) — no hay
+   textura precalculada ni partículas, tal como sugería la nota original del
+   roadmap. La dirección tangencial (para el Doppler) se deriva de d(posición)/dφ
+   en la convención propia de `traceKerr` (xRef=[1,0,0], yRef=cross(spinAxis,xRef)),
+   no de la convención que usaban las partículas viejas — quedó documentado en
+   `diskColor()` porque un signo equivocado ahí habría invertido qué lado del
+   disco aparece más brillante (co-rotante con fotones prógrados, L>0).
+   - Física nueva testeada en vitest antes de portarse a GLSL, mismo patrón que
+     siempre: `kerrLensing.test.ts`/`lensing.test.ts` verifican que un rayo
+     apuntado (en espacio plano) a un punto conocido del plano ecuatorial
+     efectivamente reporta `diskHit` con el radio esperado, que un disco con
+     bordes que no contienen ese cruce cae de nuevo a escape/captura normal, y
+     que spin≠0 no cambia el plano de cruce (solo φ, por frame dragging). Se
+     extrajo `physics/vec3.ts` (antes duplicado dentro de `kerrLensing.ts`) para
+     que `lensing.ts` pudiera hacer la misma reconstrucción 3D sin repetir los
+     helpers.
+   - Bug serio encontrado en review visual: con el disco activado, **toda la
+     pantalla se volvía negra sólida** (sin estrellas, sin disco, nada) —
+     ni siquiera en la forma del disco, un negro uniforme en todo el frame.
+     Diagnosticado forzando primero el color de acierto (`diskHit`) a rojo puro
+     en vez de `diskColor(...)`: si el problema hubiera sido en el cálculo de
+     color (NaN, temperatura mal calculada) se habría visto rojo sólido en vez
+     de negro; en cambio seguía negro, así que el bug estaba en que `captured`
+     terminaba en `true` para prácticamente todo rayo. Causa: `traceSchwarzschild`/
+     `traceKerr` ganaron un nuevo camino de retorno temprano (el cruce del
+     disco) que fijaba `diskHit`/`diskRadius`/`diskPosition` pero nunca escribía
+     el parámetro `out bool captured` — un `out` no asignado en todos los
+     caminos de retorno es comportamiento no definido en GLSL, y aparentemente
+     el driver de este entorno lo leía como "verdadero" en la práctica. El fix
+     fue trivial (`captured = false;` explícito junto a `diskHit = true;` en
+     ambos tracers) pero encontrar la causa no lo fue — confirmado forzando
+     temporalmente la condición de cruce a `false` (sin tocar nada más), lo que
+     restauró el render correcto, aislando el bug al bloque de detección de
+     disco en sí y no a otra parte del archivo.
+   - Verificado en el navegador: el disco ahora se ve curvado hacia arriba
+     detrás de la sombra en ángulos oblicuos (el look clásico de M87/Interstellar
+     que motivó este PR), con blueshift visible del lado que se acerca; funciona
+     en Schwarzschild y Kerr; el switch "Mostrar disco de acreción" (del PR 6)
+     sigue ocultándolo por completo (pasa `null` en vez de bounds reales,
+     deshabilitando el chequeo de cruce vía el sentinel `innerRadius <= 0`); los
+     tres niveles de calidad del PR 7 renderizan sin errores con el disco activo.
+   - **Segundo bug, más serio, encontrado en la siguiente review**: con spin o
+     carga (Kerr/Reissner–Nordström/Kerr–Newman) el disco aparecía con un
+     "mordisco" — una cuña completa faltante — a spin moderado, y directamente
+     desaparecía casi por completo a spin extremal. Schwarzschild (spin=carga=0)
+     nunca lo mostró, porque no comparte el integrador afectado.
+     - Diagnóstico inicial (equivocado): pareció un problema de *muestreo* — cerca
+       de la esfera de fotones, θ puede cruzar π/2 y volver dentro de un único
+       paso de RK4, y si ambos extremos del paso caen del mismo lado, el chequeo
+       de cruce (que sólo miraba los dos extremos) no ve ningún cambio de signo.
+       Se probó re-chequear varios puntos interpolados linealmente dentro de cada
+       paso — no cambió nada en absoluto. Segunda vuelta: se probó reusar los
+       puntos intermedios *reales* del propio RK4 (r2/θ2, r3/θ3, r4/θ4, ya
+       calculados para el paso de integración, no interpolados) — tampoco cambió
+       nada. Ambos intentos fallaron por la misma razón de fondo: el problema no
+       era *dónde* se mira dentro del paso, sino que el paso en sí, con el δτ de
+       calidad "Media"/"Baja", es demasiado grande para que la solución numérica
+       *alcance* el verdadero extremo de θ cerca de la esfera de fotones — no es
+       que la trayectoria correcta cruce π/2 y el muestreo se lo pierda, es que la
+       trayectoria *calculada* con ese δτ nunca llega a cruzarlo. Confirmado
+       cambiando manualmente sólo la calidad a "Alta" (δτ más fino, mismo rango
+       total integrado): el mordisco desaparecía sin tocar nada más del código.
+     - Fix real: la precisión del integrador de Kerr **deja de depender del
+       selector de calidad**. Antes, "Baja"/"Media"/"Alta" escalaban steps y δτ
+       de Kerr igual que los de Schwarzschild (ver PR 7) — ahora `KERR_STEPS`/
+       `KERR_D_TAU` en `renderQuality.ts` son una constante fija (6000 pasos,
+       δτ ajustado para mantener el mismo rango total integrado de siempre), y
+       el selector de calidad sólo controla los pasos de Schwarzschild (donde sí
+       es seguro reducirlos) y el pixel ratio del render (que sigue aplicando
+       parejo, con o sin spin). No es un descuido: bajar la precisión de Kerr no
+       sólo se ve peor, directamente da un resultado *incorrecto* (geometría con
+       agujeros) — y eso es peor que un render más lento. El motivo original de
+       "Calidad" (PR 7, rendimiento) queda intacto para el caso común
+       (Schwarzschild, o pixel ratio en cualquier caso); lo que se pierde es la
+       posibilidad de bajar el costo de Kerr específicamente, hasta que exista un
+       integrador de paso adaptativo (δτ más fino sólo cerca de la esfera de
+       fotones, normal en el resto) — trabajo futuro, ver `renderQuality.ts`.
+     - Verificado en el navegador en el peor caso conocido (spin=1.00 extremal,
+       calidad "Baja", que antes hacía desaparecer el disco casi por completo):
+       disco completo, sin mordiscos, con un ligero grano/ruido numérico sólo en
+       el borde más cercano al eje — un residuo mucho más sutil, consistente con
+       que ISCO≈horizonte en el límite extremal es un régimen genuinamente
+       delicado, no con el bug original. Repetido con carga (Reissner–Nordström)
+       en "Baja": mismo resultado limpio, confirmando que el fix cubre el
+       integrador Kerr–Newman completo (no sólo el caso de spin puro).
+   - **Espesor del disco**, pedido explícito del usuario tras revisar (los discos
+     reales no son un plano infinitesimal, y uno lo es se vuelve invisible visto
+     exactamente de canto). El chequeo de cruce, que antes buscaba θ=π/2 exacto
+     (Kerr) o y=0 exacto (Schwarzschild), ahora busca la entrada a un *slab*
+     angular (`disk.halfAngle`, en `DiskBounds` de ambos módulos — 0 reproduce
+     el plano original) — dos caras (π/2∓halfAngle en Kerr; ±r·sin(halfAngle)
+     en el y de Schwarzschild, ya que ese tracer trabaja en y del mundo en vez
+     de θ) en vez de una. La reconstrucción de posición en Kerr pasó a usar la
+     fórmula general (sinθ·cosφ·xRef + sinθ·senφ·yRef + cosθ·spinAxis) en vez
+     del atajo válido sólo en θ=π/2 exacto; en Schwarzschild no hizo falta
+     cambiar nada ahí — la fórmula `r·cosφ·e1 + r·senφ·e2` ya reconstruye el
+     punto 3D exacto para cualquier y, sea 0 o no. `DISK_HALF_ANGLE = 0.12`
+     rad en `LensedBackground.tsx` (sin(0.12)≈12% de aspecto altura/radio en
+     el borde interno) — un valor fijo, no expuesto en el sidebar por ahora.
+     Testeado en vitest (ambos módulos) antes de portar a GLSL, mismo patrón
+     de siempre. Verificado en el navegador: el disco muestra un borde visible
+     de verdad en ángulos cercanos a de canto, en vez de desaparecer como una
+     línea infinitamente fina.
+   - **Textura de flujo rotante**, para recuperar la sensación de giro que se
+     perdió al reemplazar las partículas (un disco analítico estacionario y
+     simétrico genuinamente no necesita animarse — su patrón de brillo no
+     cambia con el tiempo en ese modelo idealizado — así que no había nada que
+     animar antes de esto). Textura de ruido procedural tileable
+     (`generateDiskFlowTexture()`, canvas 2D, mismo patrón que la textura de
+     fondo: varias octavas de blobs suaves, cada uno dibujado tres veces
+     (∓ancho) para que el borde U=0/1 empalme sin costura ya que se samplea
+     con `RepeatWrapping`) sampleada en `diskColor()` con coordenadas
+     co-rotantes: φ mundial (recuperado directo de `position`, sin importar
+     qué tracer generó el punto — es un punto 3D exacto de por sí, no hace
+     falta el φ interno de ningún tracer) menos Ω(r)·t·`VISUAL_TIME_SCALE`
+     (Ω Kepleriano = √(M/r³), mismo ×15 de siempre para legibilidad). El
+     resultado modula el brillo del color analítico ya existente (no lo
+     reemplaza), y al ser Ω(r) decreciente con r, el patrón gira visiblemente
+     más rápido cerca del ISCO que en el borde exterior — la misma rotación
+     diferencial real, ahora visible. Verificado en el navegador: patrón de
+     turbulencia claramente animado (dos capturas separadas por unos segundos
+     muestran el patrón desplazado), con el streaking característico de
+     rotación diferencial más marcado cerca del borde interno.
+9. **Modo Visual vs. Riguroso** (idea del usuario, pendiente de implementar).
+   Motivación: éste es ante todo un simulador *educativo/visual* — nadie está
+   mirando las ecuaciones, están mirando el render — y aun con `KERR_STEPS`
+   fijo en un valor alto (ítem 8), el usuario sigue sintiendo que spin/carga
+   "no mejoran" tanto como Schwarzschild. Dado que (a) el frame dragging no es
+   algo que el usuario vaya a medir a simple vista, sólo notar cualitativamente,
+   y (b) el efecto visual de la carga eléctrica es casi imperceptible (y ni
+   siquiera está claro que agujeros negros cargados existan en la realidad),
+   tiene sentido simplificar la física para el caso común sin tirar el trabajo
+   riguroso ya hecho.
+   Propuesta (mía, aceptada en principio por el usuario, sin diseñar en
+   detalle todavía): agregar un modo "Riguroso" (el integrador Kerr–Newman
+   actual, geodésicas exactas vía constante de Carter, intacto tal cual está)
+   y un modo "Visual" (nuevo, probablemente default) que:
+   - Calcula horizonte/ergosfera/ISCO/esfera de fotones con las fórmulas
+     cerradas exactas que ya existen en `physics/metric.ts`/`physics/orbits.ts`
+     (instantáneas, no iterativas) — el tamaño de la sombra y del disco siguen
+     siendo Kerr–Newman correctos.
+   - Traza los rayos con el integrador Schwarzschild-2D ya robusto (el mismo
+     que nunca tuvo los problemas de precisión cerca de la esfera de fotones
+     que motivaron el ítem 8), sumándole un sesgo simple de frame dragging
+     (asimetría prógrado/retrógrado aproximada, sin resolver Carter) en vez de
+     integrar la ecuación completa en 4D.
+   - Ignora el efecto de la carga sobre la trayectoria del rayo por completo
+     en modo Visual (sólo afecta el tamaño del horizonte, vía las fórmulas
+     exactas) — coincide con la observación del usuario de que ese efecto es
+     casi invisible de todas formas.
+   Trade-off explícito: se pierde precisión pixel-perfect muy cerca de la
+   esfera de fotones a cambio de robustez total y velocidad — pero nada del
+   trabajo riguroso se pierde, queda intacto y seleccionable. PR propia, no
+   parte de otro ítem — todavía no se diseñó la fórmula exacta del sesgo de
+   frame dragging ni el nombre/UI del selector.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

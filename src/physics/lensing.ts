@@ -1,3 +1,54 @@
+import { add, scale, type Vec3 } from './vec3'
+
+/**
+ * Checks one segment of a ray's step for a crossing of one face of the
+ * disk's slab (world-space y = faceSign · r · sinHalfAngle — the two faces
+ * of the disk, or exactly y=0 for a zero-thickness disk) within
+ * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
+ * The threshold is evaluated at each point's own r (approximated as linear
+ * across the segment, same caveat as everywhere else this file interpolates).
+ */
+function checkDiskBoundaryY(
+  aR: number, aPhi: number, aY: number,
+  bR: number, bPhi: number, bY: number,
+  faceSign: number,
+  sinHalfAngle: number,
+  innerRadius: number,
+  outerRadius: number,
+): { radius: number; phi: number } | null {
+  const aG = aY - faceSign * aR * sinHalfAngle
+  const bG = bY - faceSign * bR * sinHalfAngle
+  if (aG * bG >= 0) return null
+  const fraction = aG / (aG - bG)
+  const radius = aR + fraction * (bR - aR)
+  if (radius < innerRadius || radius > outerRadius) return null
+  const phi = aPhi + fraction * (bPhi - aPhi)
+  return { radius, phi }
+}
+
+/**
+ * World-space basis for the ray's fixed orbital plane (e1 = initial radial
+ * direction, e2 = initial tangential direction) plus the disk's radial
+ * bounds — everything traceSchwarzschildRay needs to reconstruct 3D
+ * positions along the ray and check them against the (world-space,
+ * equatorial-plane) disk, without otherwise needing to know about 3D
+ * vectors at all.
+ */
+export interface DiskBounds {
+  e1: Vec3
+  e2: Vec3
+  innerRadius: number
+  outerRadius: number
+  /**
+   * Angular half-thickness (radians) of the disk around the equatorial
+   * (world-space y=0) plane — see kerrLensing.ts's DiskBounds for the
+   * rationale. Expressed here as a world-space y threshold of r·sin(halfAngle)
+   * at a given radius r, since this tracer works in world-space y rather
+   * than θ directly. 0 reproduces the original zero-thickness plane.
+   */
+  halfAngle: number
+}
+
 export interface RayOutcome {
   captured: boolean
   /**
@@ -6,6 +57,12 @@ export interface RayOutcome {
    * Present only when the ray escapes.
    */
   direction?: { e1: number; e2: number }
+  /**
+   * Set when the ray crosses the disk's plane (world-space y=0, since the
+   * spin axis is world-space Y) within [innerRadius, outerRadius] before
+   * being captured or escaping — see traceSchwarzschildRay's doc comment.
+   */
+  diskHit?: { radius: number; position: Vec3 }
 }
 
 export interface TraceOptions {
@@ -14,7 +71,10 @@ export interface TraceOptions {
   dPhi?: number
   /** Radius beyond which the ray is considered to have escaped to infinity. */
   maxRadius?: number
+  /** When set, the ray is checked for crossing the disk plane within these radii — see traceSchwarzschildRay's doc comment. */
+  disk?: DiskBounds
 }
+
 
 /**
  * Traces a light ray through the Schwarzschild deflection field.
@@ -29,15 +89,27 @@ export interface TraceOptions {
  * escapes (r > maxRadius), or the step budget runs out — which only happens
  * for rays spiraling near the photon sphere, and is treated as captured,
  * since such a ray is on an unstable orbit headed for the horizon.
+ *
+ * When options.disk is set, the trace also terminates early — same as a
+ * capture — the first time it crosses the disk's plane (world-space y=0)
+ * within [innerRadius, outerRadius], returning the crossing radius and
+ * world position instead of an escape direction. The ray's own orbital
+ * plane is generally tilted relative to the disk's (this function has no
+ * notion of "up" otherwise), so disk.e1/e2 — the same world-space basis
+ * vectors the caller uses to reconstruct the escape direction — are what
+ * let this reconstruct a 3D position each step and check its y-component
+ * for a sign change, i.e. a crossing.
  */
 export function traceSchwarzschildRay(
   { mass, horizonRadius }: { mass: number; horizonRadius: number },
   r0: number,
   rdRadial: number,
   rdTangential: number,
-  { maxSteps = 300, dPhi = 0.02, maxRadius = 100 * mass }: TraceOptions = {},
+  { maxSteps = 300, dPhi = 0.02, maxRadius = 100 * mass, disk }: TraceOptions = {},
 ): RayOutcome {
-  // Radial ray (b = 0): no deflection, no orbital plane to speak of.
+  // Radial ray (b = 0): no deflection, no orbital plane to speak of — and
+  // no disk check either, since there isn't a well-defined plane basis for
+  // this degenerate case, but reaching it is measure-zero in screen space.
   if (rdTangential < 1e-6) {
     if (rdRadial < 0) return { captured: true }
     return { captured: false, direction: { e1: 1, e2: 0 } }
@@ -52,6 +124,9 @@ export function traceSchwarzschildRay(
 
   let escaped = false
   for (let step = 0; step < maxSteps; step++) {
+    const prevU = u
+    const prevPhi = phi
+
     const k1u = v
     const k1v = -u + 3 * mass * u * u
 
@@ -73,6 +148,54 @@ export function traceSchwarzschildRay(
     u += (dPhi / 6) * (k1u + 2 * k2u + 2 * k3u + k4u)
     v += (dPhi / 6) * (k1v + 2 * k2v + 2 * k3v + k4v)
     phi += dPhi
+
+    if (disk) {
+      // Checked via the RK4 stage points (start → stage 2 → stage 3 →
+      // stage 4 → end), not a linear subdivision of the two endpoints —
+      // see kerrLensing.ts's traceKerrRay for why: linear interpolation
+      // between two points on the same side of the disk plane is
+      // monotonic and cannot reveal an in-between dip no matter how
+      // finely subdivided, while the stage points are real evaluations
+      // through the step (here, r2/r3/r4 = 1/u2, 1/u3, 1/u4 are already
+      // computed above; this φ parametrization makes the stage φ values
+      // exact rather than approximated — φ is the independent variable
+      // here, not integrated, so stages 2 and 3 both land at exactly
+      // prevPhi + dPhi/2 and stage 4 at exactly prevPhi + dPhi).
+      const prevR = 1 / prevU
+      const r2 = 1 / u2
+      const r3 = 1 / u3
+      const r4 = 1 / u4
+      const phiMid = prevPhi + dPhi / 2
+      const phiEnd = prevPhi + dPhi
+      const newR = 1 / u
+
+      const pointsRPhi: readonly [number, number][] = [
+        [prevR, prevPhi],
+        [r2, phiMid],
+        [r3, phiMid],
+        [r4, phiEnd],
+        [newR, phiEnd],
+      ]
+      const points = pointsRPhi.map(([pr, pphi]): readonly [number, number, number] => [
+        pr,
+        pphi,
+        pr * (Math.cos(pphi) * disk.e1[1] + Math.sin(pphi) * disk.e2[1]),
+      ])
+      const sinHalfAngle = Math.sin(disk.halfAngle)
+
+      for (let i = 1; i < points.length; i++) {
+        const [aR, aPhi, aY] = points[i - 1]
+        const [bR, bPhi, bY] = points[i]
+        const hit =
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, 1, sinHalfAngle, disk.innerRadius, disk.outerRadius) ??
+          checkDiskBoundaryY(aR, aPhi, aY, bR, bPhi, bY, -1, sinHalfAngle, disk.innerRadius, disk.outerRadius)
+        if (hit) {
+          const { radius: hitR, phi: hitPhi } = hit
+          const position = add(scale(disk.e1, hitR * Math.cos(hitPhi)), scale(disk.e2, hitR * Math.sin(hitPhi)))
+          return { captured: false, diskHit: { radius: hitR, position } }
+        }
+      }
+    }
 
     if (u > uHorizon) return { captured: true }
     if (u < uMin) {

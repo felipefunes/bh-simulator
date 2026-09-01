@@ -1,32 +1,49 @@
-type Vec3 = readonly [number, number, number]
+import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec3'
 
-function dot(a: Vec3, b: Vec3): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+/**
+ * Checks one segment of a ray's step for a crossing of one disk boundary
+ * (θ = boundaryTheta — either π/2 − halfAngle or π/2 + halfAngle, the two
+ * faces of the disk's slab, or π/2 itself for a zero-thickness disk) within
+ * [innerRadius, outerRadius]. Returns the interpolated hit point, or null.
+ */
+function checkDiskBoundary(
+  aR: number, aTheta: number, aPhi: number,
+  bR: number, bTheta: number, bPhi: number,
+  boundaryTheta: number,
+  innerRadius: number,
+  outerRadius: number,
+): { radius: number; theta: number; phi: number } | null {
+  if ((aTheta - boundaryTheta) * (bTheta - boundaryTheta) >= 0) return null
+  const fraction = (boundaryTheta - aTheta) / (bTheta - aTheta)
+  const radius = aR + fraction * (bR - aR)
+  if (radius < innerRadius || radius > outerRadius) return null
+  const phi = aPhi + fraction * (bPhi - aPhi)
+  return { radius, theta: boundaryTheta, phi }
 }
-function cross(a: Vec3, b: Vec3): Vec3 {
-  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-function sub(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-function scale(a: Vec3, s: number): Vec3 {
-  return [a[0] * s, a[1] * s, a[2] * s]
-}
-function add(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-function length(a: Vec3): number {
-  return Math.sqrt(dot(a, a))
-}
-function normalize(a: Vec3): Vec3 {
-  const l = length(a)
-  return [a[0] / l, a[1] / l, a[2] / l]
+
+export interface DiskBounds {
+  innerRadius: number
+  outerRadius: number
+  /**
+   * Angular half-thickness (radians) of the disk around the equatorial
+   * plane (θ = π/2 ± halfAngle), so the disk reads as a real 3D slab —
+   * visible edge-on, not just an infinitesimal plane that vanishes when
+   * viewed exactly side-on. 0 reproduces the original zero-thickness plane.
+   */
+  halfAngle: number
 }
 
 export interface KerrRayOutcome {
   captured: boolean
   /** World-space unit direction the ray escapes toward. Set only when captured is false. */
   direction?: Vec3
+  /**
+   * Set when the ray crosses the equatorial (disk) plane within
+   * [innerRadius, outerRadius] before being captured or escaping — the disk
+   * is opaque, so this takes priority over whatever direction/captured
+   * would otherwise apply (see traceKerrRay's disk option).
+   */
+  diskHit?: { radius: number; position: Vec3 }
 }
 
 export interface KerrTraceOptions {
@@ -34,6 +51,8 @@ export interface KerrTraceOptions {
   /** Step size in Mino time (dτ = dλ/Σ) — see the derivation note below. */
   dTau?: number
   maxRadius?: number
+  /** When set, the ray is checked for crossing the equatorial plane within these radii — see traceKerrRay's doc comment. */
+  disk?: DiskBounds
 }
 
 /**
@@ -93,6 +112,14 @@ export interface KerrTraceOptions {
  * (prograde and retrograde) matching photonSphereRadius from physics/orbits;
  * and the qualitative frame-dragging asymmetry (same |b|, opposite outcome
  * for prograde vs. retrograde at high spin). See kerrLensing.test.ts.
+ *
+ * When options.disk is set, the trace also terminates early — same as a
+ * capture — the first time it crosses the equatorial plane (θ=π/2, where
+ * the disk lives) within [innerRadius, outerRadius], returning the crossing
+ * radius and world position instead of an escape direction. This is what
+ * lets the disk appear properly lensed (deformed, and duplicated above/below
+ * the shadow) rather than as flat, unlensed particle geometry — see
+ * LensedBackground.tsx's GLSL mirror and roadmap item 8.
  */
 export function traceKerrRay(
   {
@@ -104,7 +131,7 @@ export function traceKerrRay(
   cameraPos: Vec3,
   rayDir: Vec3,
   spinAxis: Vec3,
-  { maxSteps = 20000, dTau = 0.0005, maxRadius = 100 * mass }: KerrTraceOptions = {},
+  { maxSteps = 20000, dTau = 0.0005, maxRadius = 100 * mass, disk }: KerrTraceOptions = {},
 ): KerrRayOutcome {
   const M = mass
   const a = spin
@@ -203,17 +230,99 @@ export function traceKerrRay(
   const thetaNearPole = Q + cosGuard * cosGuard * (a * a - (L * L) / (sinGuard * sinGuard))
   const isPoleCrossing = thetaNearPole > 0
 
+  const HALF_PI = Math.PI / 2
+
   for (let step = 0; step < maxSteps; step++) {
+    const prevR = r
+    const prevTheta = theta
+    const prevPhi = phi
+
     const k1 = derivatives(r, theta, wr, wth)
-    const k2 = derivatives(r + (dTau / 2) * k1[0], theta + (dTau / 2) * k1[1], wr + (dTau / 2) * k1[3], wth + (dTau / 2) * k1[4])
-    const k3 = derivatives(r + (dTau / 2) * k2[0], theta + (dTau / 2) * k2[1], wr + (dTau / 2) * k2[3], wth + (dTau / 2) * k2[4])
-    const k4 = derivatives(r + dTau * k3[0], theta + dTau * k3[1], wr + dTau * k3[3], wth + dTau * k3[4])
+    const r2 = r + (dTau / 2) * k1[0]
+    const th2 = theta + (dTau / 2) * k1[1]
+    const phi2 = phi + (dTau / 2) * k1[2]
+    const k2 = derivatives(r2, th2, wr + (dTau / 2) * k1[3], wth + (dTau / 2) * k1[4])
+    const r3 = r + (dTau / 2) * k2[0]
+    const th3 = theta + (dTau / 2) * k2[1]
+    const phi3 = phi + (dTau / 2) * k2[2]
+    const k3 = derivatives(r3, th3, wr + (dTau / 2) * k2[3], wth + (dTau / 2) * k2[4])
+    const r4 = r + dTau * k3[0]
+    const th4 = theta + dTau * k3[1]
+    const phi4 = phi + dTau * k3[2]
+    const k4 = derivatives(r4, th4, wr + dTau * k3[3], wth + dTau * k3[4])
 
     r += (dTau / 6) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
     theta += (dTau / 6) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
     phi += (dTau / 6) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
     wr += (dTau / 6) * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3])
     wth += (dTau / 6) * (k1[4] + 2 * k2[4] + 2 * k3[4] + k4[4])
+
+    // The disk is opaque and lies exactly in the equatorial plane (θ=π/2),
+    // so a crossing here terminates the trace immediately, the same way
+    // capture does. Must be checked before the POLE_GUARD block below,
+    // which only ever adjusts theta near the poles (far from π/2) and
+    // would otherwise be irrelevant either way.
+    //
+    // Checking only the step's two endpoints (as this originally did) can
+    // miss a crossing: near the photon sphere, θ can swing past π/2 and
+    // back within a *single* RK4 step (strongly-bent, near-critical rays
+    // are exactly where this happens), and if both endpoints land on the
+    // same side, the endpoint-only check sees no sign change — found via
+    // visual QA as a literal wedge/"notch" bitten out of the disk's lensed
+    // image at moderate-to-high spin, confirmed as a step-size issue (not a
+    // deeper physics/algorithm bug) because the "high" quality preset's
+    // finer dτ made it vanish with no other change.
+    //
+    // The fix is *not* to linearly interpolate more points between the two
+    // endpoints — that can't work: linear interpolation between two points
+    // on the same side of π/2 is monotonic and mathematically cannot dip to
+    // the other side no matter how finely it's subdivided, regardless of
+    // what the true curve did in between (confirmed empirically: an
+    // 8-point subdivision of just the endpoints left the notch completely
+    // unchanged). What actually carries curvature information are the RK4
+    // stage evaluations themselves — (r2,θ2), (r3,θ3), (r4,θ4) above are
+    // already real evaluations of the derivative at three different points
+    // through the step, not interpolation, so a same-step dip that reaches
+    // an actual stage point does show up. Checking consecutive pairs
+    // (start → stage 2 → stage 3 → stage 4 → end) costs nothing extra
+    // (those stage values are already computed for the RK4 update above,
+    // this only adds the phi2/phi3/phi4 bookkeeping) and resolved the notch
+    // in visual testing where the subdivision approach did not.
+    if (disk) {
+      const points: readonly [number, number, number][] = [
+        [prevR, prevTheta, prevPhi],
+        [r2, th2, phi2],
+        [r3, th3, phi3],
+        [r4, th4, phi4],
+        [r, theta, phi],
+      ]
+
+      // The disk is a slab of angular half-thickness disk.halfAngle around
+      // the equatorial plane, not an infinitesimal plane — so it has two
+      // faces (θ = π/2 ∓ halfAngle) rather than one, and a ray entering
+      // from either side hits whichever it reaches first. halfAngle = 0
+      // collapses both to exactly π/2, reproducing the original plane.
+      const upperFace = HALF_PI - disk.halfAngle
+      const lowerFace = HALF_PI + disk.halfAngle
+
+      for (let i = 1; i < points.length; i++) {
+        const [aR, aTheta, aPhi] = points[i - 1]
+        const [bR, bTheta, bPhi] = points[i]
+        const hit =
+          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, upperFace, disk.innerRadius, disk.outerRadius) ??
+          checkDiskBoundary(aR, aTheta, aPhi, bR, bTheta, bPhi, lowerFace, disk.innerRadius, disk.outerRadius)
+        if (hit) {
+          const sinHitTheta = Math.sin(hit.theta)
+          const cosHitTheta = Math.cos(hit.theta)
+          const direction = add(
+            add(scale(xRef, sinHitTheta * Math.cos(hit.phi)), scale(yRef, sinHitTheta * Math.sin(hit.phi))),
+            scale(spinAxis, cosHitTheta),
+          )
+          const position = scale(direction, hit.radius)
+          return { captured: false, diskHit: { radius: hit.radius, position } }
+        }
+      }
+    }
 
     if (theta < POLE_GUARD) {
       theta = 2 * POLE_GUARD - theta

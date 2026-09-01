@@ -4,7 +4,6 @@ import { horizonRadii } from '../../physics/metric'
 import { iscoRadius } from '../../physics/orbits'
 import { pixelRatioForQuality } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
-import { AccretionDisk } from './AccretionDisk'
 import { LensedBackground } from './LensedBackground'
 
 // Wide enough that the temperature profile has room to cool from
@@ -25,23 +24,26 @@ export function BlackHoleCanvas() {
   const innerRadius = iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2
   const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
 
-  // The lensing shader itself renders the shadow (which is larger than the
-  // true horizon — the photon capture radius, 3√3M ≈ 5.2M vs. 2M — that's
-  // the real "black hole photo" look), so there's no separate horizon mesh
-  // to draw. For a naked singularity (horizons === null) it just never
-  // captures light — see LensedBackground/physics/lensing.ts.
+  // The lensing shader itself renders both the shadow (larger than the true
+  // horizon — the photon capture radius, 3√3M ≈ 5.2M vs. 2M — that's the
+  // real "black hole photo" look) and, as of roadmap item 8, the disk: the
+  // same curved ray that finds the shadow/background also checks for a
+  // crossing of the disk plane, so the disk is properly lensed (deformed,
+  // duplicated above/below the shadow) instead of drawn as flat, unlensed
+  // particle geometry on top. showDisk (the visual-QA toggle added during
+  // PR 6's review, to see pole artifacts unobscured) now disables that
+  // check by passing null instead of real bounds. For a naked singularity
+  // (horizons === null) the shadow just never captures light — see
+  // LensedBackground/physics/lensing.ts.
   return (
     <Canvas camera={{ position: [0, 51, 111], fov: 50 }} dpr={dpr}>
-      <LensedBackground params={params} horizonRadius={horizons?.outer ?? 1e-6} quality={quality} />
+      <LensedBackground
+        params={params}
+        horizonRadius={horizons?.outer ?? 1e-6}
+        quality={quality}
+        disk={showDisk ? { innerRadius, outerRadius } : null}
+      />
       <ambientLight intensity={0.15} />
-      {showDisk && (
-        <AccretionDisk
-          key={`${innerRadius.toFixed(3)}-${outerRadius.toFixed(3)}`}
-          mass={params.mass}
-          innerRadius={innerRadius}
-          outerRadius={outerRadius}
-        />
-      )}
       <OrbitControls enableDamping minDistance={3} maxDistance={180} />
     </Canvas>
   )
