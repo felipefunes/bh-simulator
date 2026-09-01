@@ -240,6 +240,36 @@ describe('traceKerrRay', () => {
       expect(result.diskHit!.position[1]).toBeCloseTo(0, 2)
     })
 
+    it('detects a diskHit for a ray whose y sits inside the thickness band far outside the radial bounds, only reaching them later (regression: "two disks with a gap")', () => {
+      // Camera and target share the same y (0.3, well inside halfThickness
+      // =0.5) — this ray's y stays ~constant near 0.3 for its whole path, so
+      // it's already inside the Y-band from r0≈45 (well outside
+      // [innerRadius=6, outerRadius=20]), long before its radius shrinks
+      // into bounds. A per-face sign-change check (the version this
+      // replaced) never sees a boundary crossed at all, since y never
+      // approaches ±halfThickness from outside it — this is exactly the gap
+      // the user reported as looking like "two disks" with empty space
+      // between them at a near-edge-on camera angle.
+      const grazingCamera = [0, 0.3, 45] as const
+      const grazingTarget = [0, 0.3, 10] as const
+      const diff = [
+        grazingTarget[0] - grazingCamera[0],
+        grazingTarget[1] - grazingCamera[1],
+        grazingTarget[2] - grazingCamera[2],
+      ] as const
+      const len = Math.hypot(diff[0], diff[1], diff[2])
+      const grazingRayDir = [diff[0] / len, diff[1] / len, diff[2] / len] as const
+
+      const result = traceKerrRay({ mass, spin: 0, horizonRadius }, grazingCamera, grazingRayDir, spinAxis, {
+        maxSteps: 20000,
+        dTau: 0.0005,
+        maxRadius: 2000,
+        disk: { innerRadius: 6, outerRadius: 20, halfThickness: 0.5 },
+      })
+
+      expect(result.diskHit).toBeDefined()
+    })
+
     it('with a thick disk, hits a face offset from the exact equatorial plane', () => {
       const thin = traceKerrRay({ mass, spin: 0, horizonRadius }, cameraPos, rayDir, spinAxis, {
         maxSteps: 20000,
@@ -256,11 +286,16 @@ describe('traceKerrRay', () => {
 
       expect(thin.diskHit).toBeDefined()
       expect(thick.diskHit).toBeDefined()
-      // The ray approaches from above (camera y=20 > 0), so it should hit
-      // the *upper* face first, at exactly y=halfThickness — a constant,
-      // unlike the angle-based version this replaced (see checkDiskBoundaryY's
-      // doc comment in lensing.ts), regardless of the hit radius.
-      expect(thick.diskHit!.position[1]).toBeCloseTo(0.5, 5)
+      // The ray approaches from above (camera y=20 > 0), so it should enter
+      // through the upper half of the slab, somewhere in (0, halfThickness]
+      // — this is an entry-into-the-region check rather than an exact
+      // boundary interpolation (see isInsideDiskSlab's doc comment in
+      // kerrLensing.ts for why that tradeoff fixes a worse bug: rays that
+      // silently entered the Y-band before their radius reached the disk's
+      // bounds).
+      expect(thick.diskHit!.position[1]).toBeGreaterThan(0)
+      expect(thick.diskHit!.position[1]).toBeLessThanOrEqual(0.5)
+      expect(thick.diskHit!.position[1]).not.toBeCloseTo(thin.diskHit!.position[1], 2)
     })
   })
 })

@@ -496,6 +496,34 @@ clasificación del caso) de forma aislada del render.
        canto (incluyendo el mismo tipo de encuadre del reporte original): borde
        del disco visible como una franja delgada consistente, sin forma de
        reloj de arena/hi-hat a ningún ángulo probado.
+     - **Segundo bug, tras el fix anterior**: de canto, el disco se veía como
+       **dos discos separados con un espacio vacío entre medio** en vez de un
+       slab relleno — reportado por el usuario como "tenemos ese espacio aún
+       entre dos discos". Causa: el chequeo de cruce (`isInsideDiskSlab`)
+       exige que el radio Y el espesor se satisfagan *en el mismo paso* de
+       integración — pero un rayo casi de canto puede entrar a la banda de
+       espesor (|y|≤halfThickness) muy lejos del agujero, con el radio
+       todavía fuera de `[innerRadius, outerRadius]`, y recién entrar en
+       radio muchos pasos después, sin que haya un nuevo cruce de cara ese
+       paso posterior — ese rayo nunca se registra como hit, cae al fondo, y
+       aparece como el hueco vacío. Los rayos que SÍ se detectan (los que
+       cruzan ambas condiciones a la vez) forman las dos franjas delgadas que
+       bordean el hueco. Fix: en vez de exigir el cruce de una cara específica
+       con el radio ya válido en el mismo instante, se chequea la región
+       combinada (radio Y espesor) como un solo predicado, y se dispara en su
+       transición falso→verdadero — así se detecta el paso de entrada sin
+       importar cuál de las dos condiciones sea la que recién se cumple. Caso
+       aparte: con espesor exactamente 0 (el plano infinitesimal original,
+       usado sólo en tests), "estar dentro de la banda" degenera a "y es
+       exactamente 0", algo que un muestreo continuo casi nunca toca — pero
+       un plano sin espesor tampoco puede tener el problema de "quedarse
+       adentro varios pasos", así que ese caso sigue usando el cruce por
+       cambio de signo de siempre (`checkDiskPlaneCrossing`), sin necesidad
+       del nuevo chequeo. Testeado en vitest con un caso específico que
+       reproduce el bug (cámara y objetivo con la misma altura y, dentro del
+       espesor, a un radio bien fuera de `[innerRadius, outerRadius]`, que
+       sólo entra en rango muchos pasos después) en ambos módulos
+       (`lensing.test.ts`/`kerrLensing.test.ts`) antes de portar a GLSL.
    - **Textura de flujo rotante**, para recuperar la sensación de giro que se
      perdió al reemplazar las partículas (un disco analítico estacionario y
      simétrico genuinamente no necesita animarse — su patrón de brillo no
