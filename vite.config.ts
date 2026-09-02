@@ -5,10 +5,11 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   build: {
-    // The three.js vendor chunk below is irreducibly >500kB on its own —
-    // this just stops the build from warning about a split that's already
-    // the intended fix, not a size we're failing to control.
-    chunkSizeWarningLimit: 1000,
+    // The three.js vendor chunk below is irreducibly large on its own (grew
+    // past 1000kB once drei's Html was added for InfoTooltips) — this just
+    // stops the build from warning about a split that's already the
+    // intended fix, not a size we're failing to control.
+    chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
         // three.js + r3f/drei dominate the bundle and change far less often

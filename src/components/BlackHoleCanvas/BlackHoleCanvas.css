@@ -1,14 +1,23 @@
-.black-hole-canvas__zoom-controls {
+.black-hole-canvas__side-controls {
   position: absolute;
   right: 16px;
   bottom: 16px;
   z-index: 10;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  /* Bigger than the zoom buttons' own internal gap, so the info toggle
+     reads as its own control rather than a third zoom button. */
+  gap: 24px;
+}
+
+.black-hole-canvas__zoom-controls {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
-.black-hole-canvas__zoom-button {
+.black-hole-canvas__control-button {
   width: 40px;
   height: 40px;
   font-size: 1.25rem;
@@ -21,6 +30,75 @@
   cursor: pointer;
 }
 
-.black-hole-canvas__zoom-button:hover {
+.black-hole-canvas__control-button:hover {
   border-color: var(--color-accent);
+}
+
+.black-hole-canvas__info-toggle-button {
+  border-radius: 999px;
+  font-style: italic;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+}
+
+.black-hole-canvas__info-toggle-button[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* InfoTooltips: each label is a drei <Html> positioned at its 3D anchor, so
+   everything here is relative to that anchor point (0, 0). */
+.info-tooltip__dot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+}
+
+.info-tooltip__line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.6);
+  transform-origin: 0 0;
+}
+
+.info-tooltip__label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 160px;
+  padding: 8px 10px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--color-text);
+}
+
+.info-tooltip__label strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--color-accent);
+}
+
+.info-tooltip__label p {
+  margin: 0;
+  color: var(--color-text-dim);
+}
+
+@media (max-width: 760px) {
+  .info-tooltip__label {
+    width: 130px;
+    padding: 6px 8px;
+    font-size: 0.72rem;
+  }
 }

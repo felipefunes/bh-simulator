@@ -12,11 +12,14 @@ interface BlackHoleStore {
   showDisk: boolean
   /** Integrator steps + pixel ratio trade-off — see physics/renderQuality.ts. */
   quality: QualityLevel
+  /** Labeled diagram overlay (event horizon / photon sphere / shadow / disk) — see components/BlackHoleCanvas/InfoTooltips.tsx. */
+  showTooltips: boolean
   setMass: (mass: number) => void
   setSpinRatio: (spinRatio: number) => void
   setChargeRatio: (chargeRatio: number) => void
   setShowDisk: (showDisk: boolean) => void
   setQuality: (quality: QualityLevel) => void
+  setShowTooltips: (showTooltips: boolean) => void
 }
 
 export const useBlackHoleStore = create<BlackHoleStore>((set) => ({
@@ -25,11 +28,13 @@ export const useBlackHoleStore = create<BlackHoleStore>((set) => ({
   chargeRatio: 0,
   showDisk: true,
   quality: 'medium',
+  showTooltips: false,
   setMass: (mass) => set({ mass }),
   setSpinRatio: (spinRatio) => set({ spinRatio }),
   setChargeRatio: (chargeRatio) => set({ chargeRatio }),
   setShowDisk: (showDisk) => set({ showDisk }),
   setQuality: (quality) => set({ quality }),
+  setShowTooltips: (showTooltips) => set({ showTooltips }),
 }))
 
 /** The store's sliders as the absolute mass/spin/charge the physics module expects. */
