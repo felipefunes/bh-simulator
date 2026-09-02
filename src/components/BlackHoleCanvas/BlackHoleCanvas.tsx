@@ -3,10 +3,11 @@ import { Canvas } from '@react-three/fiber'
 import { useRef } from 'react'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { horizonRadii } from '../../physics/metric'
-import { iscoRadius } from '../../physics/orbits'
+import { criticalImpactParameter, iscoRadius } from '../../physics/orbits'
 import { pixelRatioForQuality } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
 import './BlackHoleCanvas.css'
+import { InfoTooltips } from './InfoTooltips'
 import { LensedBackground } from './LensedBackground'
 
 // Wide enough that the temperature profile has room to cool from
@@ -21,6 +22,8 @@ export function BlackHoleCanvas() {
   const params = useBlackHoleParams()
   const showDisk = useBlackHoleStore((state) => state.showDisk)
   const quality = useBlackHoleStore((state) => state.quality)
+  const showTooltips = useBlackHoleStore((state) => state.showTooltips)
+  const setShowTooltips = useBlackHoleStore((state) => state.setShowTooltips)
   const horizons = horizonRadii(params)
   const dpr = pixelRatioForQuality(quality, window.devicePixelRatio)
   const controlsRef = useRef<OrbitControlsImpl>(null)
@@ -30,6 +33,18 @@ export function BlackHoleCanvas() {
   // approximate multiple of the horizon until that closed form exists.
   const innerRadius = iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2
   const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
+
+  // Same closed-form-with-fallback pattern as innerRadius above, for the
+  // InfoTooltips diagram: criticalImpactParameter is only closed-form when
+  // spin and charge aren't both nonzero (general Kerr–Newman) — fall back to
+  // a multiple of the horizon (the same ratio Schwarzschild's exact value
+  // has: 3√3M/2M ≈ 2.6) rather than leave the tooltip unpositioned.
+  // Math.abs because criticalImpactParameter's sign encodes
+  // prograde/retrograde (see its doc comment in physics/orbits.ts) — the
+  // tooltip only needs a radius. InfoTooltips derives its horizon/photon
+  // sphere anchors as schematic fractions of this, not their own true radii
+  // — see its doc comment for why.
+  const shadowRadius = Math.abs(criticalImpactParameter(params) ?? (horizons?.outer ?? params.mass) * 2.6)
 
   function zoomBy(scale: number) {
     const controls = controlsRef.current
@@ -67,25 +82,40 @@ export function BlackHoleCanvas() {
         />
         <ambientLight intensity={0.15} />
         <OrbitControls ref={controlsRef} enableDamping minDistance={3} maxDistance={180} />
+        {showTooltips && (
+          <InfoTooltips shadowRadius={shadowRadius} diskMidRadius={(innerRadius + outerRadius) / 2} />
+        )}
       </Canvas>
 
-      <div className="black-hole-canvas__zoom-controls">
+      <div className="black-hole-canvas__side-controls">
         <button
           type="button"
-          className="black-hole-canvas__zoom-button"
-          aria-label="Acercar"
-          onClick={() => zoomBy(ZOOM_IN_SCALE)}
+          className="black-hole-canvas__control-button black-hole-canvas__info-toggle-button"
+          aria-label="Mostrar/ocultar información"
+          aria-pressed={showTooltips}
+          onClick={() => setShowTooltips(!showTooltips)}
         >
-          +
+          i
         </button>
-        <button
-          type="button"
-          className="black-hole-canvas__zoom-button"
-          aria-label="Alejar"
-          onClick={() => zoomBy(ZOOM_OUT_SCALE)}
-        >
-          −
-        </button>
+
+        <div className="black-hole-canvas__zoom-controls">
+          <button
+            type="button"
+            className="black-hole-canvas__control-button"
+            aria-label="Acercar"
+            onClick={() => zoomBy(ZOOM_IN_SCALE)}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="black-hole-canvas__control-button"
+            aria-label="Alejar"
+            onClick={() => zoomBy(ZOOM_OUT_SCALE)}
+          >
+            −
+          </button>
+        </div>
       </div>
     </>
   )

@@ -598,6 +598,58 @@ clasificación del caso) de forma aislada del render.
      hace falta el modo riguroso real (máquina más potente, o verificar
      precisión), sigue ahí intacto en `physics/kerrLensing.ts`; conectarlo de
      nuevo al shader como una opción sería trabajo futuro, no incluido acá.
+10. ✅ **Tooltips informativos** (pedido del usuario, con mockup a mano de
+    referencia: horizonte de eventos, esfera de fotones, sombra y disco de
+    acreción, cada uno con una línea guía apuntando a un punto del render).
+    - `components/BlackHoleCanvas/InfoTooltips.tsx` (nuevo): cuatro leader
+      lines + cajas de descripción, cada una anclada a un punto 3D fijo
+      (dirección de mundo elegida a mano para abanicar sobre el hemisferio
+      que mira a la cámara en el encuadre default, no una posición
+      físicamente significativa) a un radio real — horizonte
+      (`horizonRadii`), esfera de fotones y sombra (`photonSphereRadius`/
+      `criticalImpactParameter` de `physics/orbits.ts`, con el mismo patrón
+      de fallback-a-múltiplo-del-horizonte que ya usa el radio interno del
+      disco para los casos sin forma cerrada — carga y spin ambos ≠0), y
+      disco (punto medio entre `innerRadius`/`outerRadius`, ya calculados en
+      `BlackHoleCanvas`). Los anclajes se proyectan a pantalla vía
+      `@react-three/drei`'s `<Html>`, que ya seguía la cámara — no hizo falta
+      escribir esa parte.
+    - Oclusión: cada tooltip se oculta cuando su punto de anclaje queda
+      geométricamente detrás de la esfera de la sombra vista desde la cámara
+      (test de intersección rayo-esfera contra `shadowRadius`, el mayor de
+      los "objetos casi esféricos" opacos) — si no, el label seguiría
+      mostrándose a través de la sombra sólida al rotar la cámara al lado
+      opuesto. No se testea contra el disco (un ocluyente plano y delgado,
+      más difícil de hacer bien barato) — hueco aceptado en esta primera
+      pasada.
+    - Botón de toggle (`showTooltips` en el store, junto a `showDisk`/
+      `quality`) agregado como su propio grupo en
+      `black-hole-canvas__side-controls`, con más separación (`gap: 24px`)
+      que el gap interno de +/- zoom (`gap: 8px`) para que se lea como un
+      control aparte, tal como pidió el usuario ("al nivel de los de zoom in
+      y zoom out pero un poco más separado"). Se refactorizó
+      `.black-hole-canvas__zoom-button` a `.black-hole-canvas__control-button`
+      compartida entre los tres botones.
+    - Bug encontrado en QA de mobile (pedido explícito del usuario: "cuando
+      se haga hay que verificar en mobile"): en un viewport angosto (390px),
+      el label de "Disco de acreción" se salía por el borde derecho de la
+      pantalla — su offset fijo en píxeles (pensado para el encuadre de
+      escritorio) empujaba la caja más allá del ancho disponible. Fix: cada
+      tooltip proyecta su propia posición en pantalla cada frame (mismo
+      `useFrame` que ya hace el test de oclusión) y, si su offset horizontal
+      la sacaría del viewport (con un margen fijo `LABEL_HALF_WIDTH`),
+      refleja el signo de ese offset — un flip simple, no un sistema general
+      de reposicionamiento consciente del viewport, pero suficiente en la
+      práctica. Verificado en el navegador a 390×844 (con y sin el sidebar
+      bottom-sheet abierto simultáneamente) y contra el mismo bug reproducido
+      antes del fix.
+    - `vite.config.ts`: `chunkSizeWarningLimit` subido de 1000 a 1200 —
+      el chunk de `three` creció al agregar `Html` de drei.
+    - Deliberadamente no incluido: oclusión contra el disco (arriba), y un
+      sistema de reposicionamiento de labels más general que un flip
+      horizontal simple (por ejemplo, evitar que dos labels se superpongan
+      entre sí, o clamping vertical) — quedan como mejoras futuras si hacen
+      falta.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
