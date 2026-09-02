@@ -87,13 +87,9 @@ function Tooltip({ info, shadowRadius }: { info: TooltipSpec; shadowRadius: numb
 }
 
 export function InfoTooltips({
-  horizonRadius,
-  photonSphereRadius,
   shadowRadius,
   diskMidRadius,
 }: {
-  horizonRadius: number
-  photonSphereRadius: number
   shadowRadius: number
   diskMidRadius: number
 }) {
@@ -101,30 +97,67 @@ export function InfoTooltips({
   // BlackHoleCanvas's default camera position (roughly +Y, +Z), so all four
   // are visible without overlapping at the default framing — not physically
   // meaningful positions, just readable diagram anchor points.
+  //
+  // horizonRadius (2M) and photonSphereRadius (3M) are both *smaller* than
+  // shadowRadius (3√3M ≈ 5.2M) — and the shadow is the only one of the three
+  // that's actually a visible edge in the render (same as a real black hole
+  // photo: you see one dark region, not separate rings for the horizon and
+  // the photon sphere — neither is independently visible, ever, on any
+  // image). Their anchor points necessarily land inside the shadow's solid
+  // silhouette either way, not on a boundary of their own — but at their
+  // *true* radii (2M and 3M, both tiny next to the ~122-unit camera
+  // distance), they also land within a couple of pixels of each other and
+  // of the shadow's own center, no matter how far apart their directions
+  // are: the absolute radius is what sets the screen-space scale here, and
+  // it's too small either way to visually separate. Found via user feedback
+  // on PR 10's screenshot ("los círculos no apuntan a donde corresponde") —
+  // first tried spreading only the *directions* (top/left/bottom instead of
+  // clustered on one side), which helped the leader lines read as distinct
+  // but left the dots themselves still nearly touching.
+  //
+  // Fix: horizonRadius/photonSphereRadius below are schematic fractions of
+  // shadowRadius (0.25/0.85) instead of their true values — since neither is
+  // independently visible anyway, there's no real boundary being
+  // misrepresented, and this reproduces the mockup's intent (three visually
+  // distinct, increasingly-large nested zones) instead of three points stacked
+  // on top of each other at a physically-real but illegibly small scale.
+  // shadowRadius and diskMidRadius (both real, visible edges) are unchanged.
+  //
+  // Two earlier attempts (0.35/0.65, then 0.15/0.55) barely moved the visual
+  // result: with two anchors ~90° apart in direction, their 3D separation is
+  // dominated by sqrt(r1² + r2²) — the *larger* of the two radii — so
+  // shrinking only the smaller one (horizon) did almost nothing, and 0.35/
+  // 0.65 happened to be close enough to Schwarzschild's own true ratios
+  // (2M/5.2M≈0.38, 3M/5.2M≈0.58) to look like the same bug again. Pushing
+  // the larger radius (photon sphere) much closer to shadowRadius — not the
+  // smaller one — is what actually buys separation.
+  const schematicHorizonRadius = shadowRadius * 0.25
+  const schematicPhotonSphereRadius = shadowRadius * 0.85
+
   const tooltips: TooltipSpec[] = [
     {
       key: 'horizon',
-      direction: [0.3, 0.6, 0.74],
-      radius: horizonRadius,
+      direction: [0.05, 0.95, 0.3],
+      radius: schematicHorizonRadius,
       name: 'Horizonte de sucesos',
-      description: 'El límite de no retorno — ni la luz puede escapar desde adentro.',
-      offset: [-90, -70],
+      description: 'El límite de no retorno — ni la luz puede escapar desde adentro. No es visible por separado: queda oculto dentro de la sombra.',
+      offset: [-30, -100],
     },
     {
       key: 'photon-sphere',
-      direction: [0.6, 0.35, 0.7],
-      radius: photonSphereRadius,
+      direction: [-0.9, 0.15, 0.4],
+      radius: schematicPhotonSphereRadius,
       name: 'Esfera de fotones',
-      description: 'El radio donde la luz puede orbitar el agujero negro, en círculos inestables.',
-      offset: [100, -60],
+      description: 'El radio donde la luz puede orbitar el agujero negro, en círculos inestables. Tampoco se ve por separado — está dentro de la sombra.',
+      offset: [-150, -10],
     },
     {
       key: 'shadow',
-      direction: [-0.4, -0.5, 0.77],
+      direction: [0.15, -0.85, 0.45],
       radius: shadowRadius,
       name: 'Sombra',
       description: 'La región oscura que realmente vemos — más grande que el horizonte, es donde cae toda la luz capturada.',
-      offset: [-110, 70],
+      offset: [-30, 100],
     },
     {
       key: 'disk',

@@ -3,7 +3,7 @@ import { Canvas } from '@react-three/fiber'
 import { useRef } from 'react'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { horizonRadii } from '../../physics/metric'
-import { criticalImpactParameter, iscoRadius, photonSphereRadius } from '../../physics/orbits'
+import { criticalImpactParameter, iscoRadius } from '../../physics/orbits'
 import { pixelRatioForQuality } from '../../physics/renderQuality'
 import { useBlackHoleParams, useBlackHoleStore } from '../../store/blackHoleStore'
 import './BlackHoleCanvas.css'
@@ -35,16 +35,16 @@ export function BlackHoleCanvas() {
   const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
 
   // Same closed-form-with-fallback pattern as innerRadius above, for the
-  // InfoTooltips diagram: photonSphereRadius/criticalImpactParameter are
-  // only closed-form when spin and charge aren't both nonzero (general
-  // Kerr–Newman) — fall back to a multiple of the horizon (the same ratios
-  // Schwarzschild's exact values have: 3M/2M = 1.5, 3√3M/2M ≈ 2.6) rather
-  // than leave the tooltip unpositioned. Math.abs because
-  // criticalImpactParameter's sign encodes prograde/retrograde (see its doc
-  // comment in physics/orbits.ts) — the tooltip only needs a radius.
-  const horizonRadiusForTooltips = horizons?.outer ?? params.mass
-  const photonRadius = photonSphereRadius(params) ?? horizonRadiusForTooltips * 1.5
-  const shadowRadius = Math.abs(criticalImpactParameter(params) ?? horizonRadiusForTooltips * 2.6)
+  // InfoTooltips diagram: criticalImpactParameter is only closed-form when
+  // spin and charge aren't both nonzero (general Kerr–Newman) — fall back to
+  // a multiple of the horizon (the same ratio Schwarzschild's exact value
+  // has: 3√3M/2M ≈ 2.6) rather than leave the tooltip unpositioned.
+  // Math.abs because criticalImpactParameter's sign encodes
+  // prograde/retrograde (see its doc comment in physics/orbits.ts) — the
+  // tooltip only needs a radius. InfoTooltips derives its horizon/photon
+  // sphere anchors as schematic fractions of this, not their own true radii
+  // — see its doc comment for why.
+  const shadowRadius = Math.abs(criticalImpactParameter(params) ?? (horizons?.outer ?? params.mass) * 2.6)
 
   function zoomBy(scale: number) {
     const controls = controlsRef.current
@@ -83,12 +83,7 @@ export function BlackHoleCanvas() {
         <ambientLight intensity={0.15} />
         <OrbitControls ref={controlsRef} enableDamping minDistance={3} maxDistance={180} />
         {showTooltips && (
-          <InfoTooltips
-            horizonRadius={horizonRadiusForTooltips}
-            photonSphereRadius={photonRadius}
-            shadowRadius={shadowRadius}
-            diskMidRadius={(innerRadius + outerRadius) / 2}
-          />
+          <InfoTooltips shadowRadius={shadowRadius} diskMidRadius={(innerRadius + outerRadius) / 2} />
         )}
       </Canvas>
 
