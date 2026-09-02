@@ -66,3 +66,48 @@ export function iscoRadius(
 
   return mass * (3 + z2 + sign * Math.sqrt((3 - z1) * (3 + z1 + 2 * z2)))
 }
+
+/**
+ * Critical impact parameter for an equatorial photon orbit — the boundary
+ * between capture and escape for a ray confined to the equatorial plane,
+ * heading in the given rotational sense relative to the spin axis. From the
+ * double-root condition R(r_ph) = R'(r_ph) = 0 (Bardeen, Press & Teukolsky
+ * 1972), solved for L in terms of the already-verified photon sphere radius:
+ *   Δ = r_ph² − 2Mr_ph + a² + Q²,  P = 2r_ph·Δ / (r_ph − M),  b = (r_ph² + a² − P) / a
+ *
+ * Sign convention matches this file's other direction-signed quantities —
+ * it is not a plain magnitude (see kerrLensing.test.ts's criticalImpactParameter
+ * test helper, which this promotes to a real, tested module function).
+ *
+ * At spin = 0 there's no prograde/retrograde distinction (frame dragging
+ * vanishes), and the /spin above is undefined there — Reissner–Nordström's
+ * own R'(r_ph) = 0 condition gives the direction-independent closed form
+ * sqrt(2r_ph³/(r_ph−M)) instead, which also reduces to Schwarzschild's exact
+ * 3√3 M when charge = 0 too.
+ *
+ * At exact extremal spin (a = M) for the prograde direction, r_ph coincides
+ * with the horizon and Δ, (r_ph − M) both vanish together — a genuine
+ * removable singularity (the limit is finite, 2M) that plain floating-point
+ * division can turn into 0/0. Guarded by returning P = 0 there directly
+ * (correct in the limit, since Δ → 0 at the same point).
+ *
+ * Charge ≠ 0 with spin ≠ 0 (general Kerr–Newman) has no known closed form
+ * for the photon sphere itself (see photonSphereRadius), so this returns
+ * null there too.
+ */
+export function criticalImpactParameter(
+  { mass, spin, charge }: BlackHoleParams,
+  direction: OrbitDirection = 'prograde',
+): number | null {
+  const rph = photonSphereRadius({ mass, spin, charge }, direction)
+  if (rph === null) return null
+
+  if (spin === 0) {
+    return Math.sqrt((2 * rph ** 3) / (rph - mass))
+  }
+
+  const denom = rph - mass
+  const delta = rph * rph - 2 * mass * rph + spin * spin + charge * charge
+  const p = denom === 0 ? 0 : (2 * rph * delta) / denom
+  return (rph * rph + spin * spin - p) / spin
+}

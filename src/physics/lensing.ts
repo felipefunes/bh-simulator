@@ -8,12 +8,12 @@ import { add, scale, type Vec3 } from './vec3'
  * The disk briefly had physical thickness (two faces, a filled slab instead
  * of this infinitesimal plane) — reverted (see git history for the full
  * saga) after it turned out to be the tipping point for GPU cost at high
- * spin/near-edge-on views: every extra per-step branch it added compounds
- * across Kerr's already load-bearing fixed 6000-step integration (see
- * KERR_STEPS's doc comment in renderQuality.ts) and across every pixel of
- * the frame. Given this is fundamentally an educational/visual simulator, a
- * flat disk that renders smoothly beats a thick one that doesn't render at
- * all.
+ * spin/near-edge-on views, back when this ray still went through the full
+ * Kerr–Newman integrator for spin/charge. That integrator has since been
+ * dropped from rendering entirely (see physics/visualSpinLensing.ts), but
+ * the thickness feature was never revisited — given this is fundamentally an
+ * educational/visual simulator, a flat disk that renders smoothly beats a
+ * thick one that doesn't render at all.
  */
 function checkDiskCrossing(
   aR: number, aPhi: number, aY: number,

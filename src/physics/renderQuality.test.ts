@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { INTEGRATOR_QUALITY, KERR_D_TAU, KERR_STEPS, pixelRatioForQuality, type QualityLevel } from './renderQuality'
+import { INTEGRATOR_QUALITY, pixelRatioForQuality, type QualityLevel } from './renderQuality'
 
 describe('INTEGRATOR_QUALITY', () => {
   it('keeps steps × stepSize (the total integrated range) constant across levels', () => {
@@ -16,17 +16,6 @@ describe('INTEGRATOR_QUALITY', () => {
   it('takes fewer Schwarzschild steps at "low" and more at "high" than "medium"', () => {
     expect(INTEGRATOR_QUALITY.low.schwSteps).toBeLessThan(INTEGRATOR_QUALITY.medium.schwSteps)
     expect(INTEGRATOR_QUALITY.high.schwSteps).toBeGreaterThan(INTEGRATOR_QUALITY.medium.schwSteps)
-  })
-})
-
-describe('KERR_STEPS / KERR_D_TAU', () => {
-  it('is not quality-dependent — always the same, generously precise value', () => {
-    // Not much to assert beyond "it exists and isn't degenerate": the whole
-    // point (see renderQuality.ts's doc comment) is that this is a fixed
-    // constant, not one of the three tunable levels above.
-    expect(KERR_STEPS).toBeGreaterThanOrEqual(6000)
-    expect(KERR_D_TAU).toBeGreaterThan(0)
-    expect(KERR_STEPS * KERR_D_TAU).toBeCloseTo(2200 * 0.0007, 10)
   })
 })
 

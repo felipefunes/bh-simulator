@@ -1,5 +1,15 @@
 import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec3'
 
+// No longer used for rendering — see physics/visualSpinLensing.ts, which
+// replaced this module's role in LensedBackground.tsx with a much cheaper
+// per-ray effective-mass bias on the Schwarzschild tracer, calibrated
+// against this module's own exact photon-sphere/critical-impact-parameter
+// physics. Kept intact, tested, and unmodified as the rigorous reference —
+// exact Kerr–Newman geodesics via the Carter constant — for anyone running
+// this on hardware that can afford it, or extending the physics further.
+// See CLAUDE.md's roadmap ("Modo Visual vs. Riguroso") for the full
+// rationale.
+
 /**
  * Checks one segment of a ray's step for a crossing of the equatorial plane
  * (θ=π/2, y = r·cosθ since the spin axis is world Y) within [innerRadius,
@@ -8,12 +18,10 @@ import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec
  * The disk briefly had physical thickness (two faces, a filled slab instead
  * of this infinitesimal plane) — reverted (see git history for the full
  * saga) after it turned out to be the tipping point for GPU cost at high
- * spin/near-edge-on views: every extra per-step branch it added compounds
- * across Kerr's already load-bearing fixed 6000-step integration (see
- * KERR_STEPS's doc comment in renderQuality.ts) and across every pixel of
- * the frame. Given this is fundamentally an educational/visual simulator, a
- * flat disk that renders smoothly beats a thick one that doesn't render at
- * all.
+ * spin/near-edge-on views, back when this was the integrator every spinning
+ * ray actually ran through for rendering. Never revisited after that — given
+ * this is fundamentally an educational/visual simulator, a flat disk that
+ * renders smoothly beats a thick one that doesn't render at all.
  */
 function checkDiskCrossing(
   aR: number, aTheta: number, aPhi: number,

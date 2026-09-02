@@ -7,6 +7,16 @@ export interface IntegratorQuality {
   schwDPhi: number
 }
 
+// This module used to also carry KERR_STEPS/KERR_D_TAU, a *fixed* (not
+// quality-tunable) high step count for a full Carter-constant Kerr–Newman
+// integrator — removed along with that integrator itself (see git history,
+// and LensedBackground.tsx's "Modo Visual" comment) once it became clear its
+// per-pixel cost, not disk-crossing bugs, was the actual ceiling on
+// performance at high spin. Rendering now always uses the Schwarzschild
+// tracer below (with a per-ray effective-mass bias standing in for real
+// frame dragging), so this quality selector applies uniformly regardless of
+// spin — a spinning hole is no longer a special, more expensive case.
+
 // "medium" reproduces the original, pre-quality-control Schwarzschild
 // constants (see git history of LensedBackground.tsx) exactly, so existing
 // renders don't shift under the default setting. Step count and step size
@@ -31,30 +41,6 @@ export const INTEGRATOR_QUALITY: Record<QualityLevel, IntegratorQuality> = {
     schwDPhi: SCHW_TOTAL_PHI / 400,
   },
 }
-
-/**
- * The Kerr–Newman (r, θ, φ, w_r, w_θ) tracer's RK4 step count/size is
- * *not* driven by the quality selector, unlike Schwarzschild's — it's fixed
- * at a single, generously precise setting instead. This isn't an
- * oversight: lower step counts here aren't just less crisp, they're
- * outright wrong. Found via visual QA at moderate spin — a coarser dτ left
- * a literal wedge/"notch" missing from the lensed disk — and root-caused to
- * the RK4 step itself being too large to reach θ's true extremum near the
- * photon sphere for strongly-bent rays, not merely under-sampling a
- * trajectory that was otherwise computed correctly (confirmed because
- * re-checking already-computed RK4 stage points, and even a fine linear
- * subdivision of a step, left the notch completely unchanged — only
- * shrinking dτ itself, i.e. more real integration steps, fixed it). Since
- * quality's original purpose (roadmap item 7) was performance, not
- * correctness, and a broken-looking disk is worse than a slower one, this
- * value is deliberately not part of that trade-off — true adaptive step
- * sizing (smaller dτ specifically near the photon sphere, standard step
- * size everywhere else) would let this scale back down safely, and is
- * future work.
- */
-export const KERR_STEPS = 6000
-const KERR_TOTAL_TAU = 2200 * 0.0007
-export const KERR_D_TAU = KERR_TOTAL_TAU / KERR_STEPS
 
 /**
  * Caps the render's device pixel ratio by quality level — the other lever

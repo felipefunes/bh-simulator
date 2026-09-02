@@ -2,7 +2,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import type { BlackHoleParams } from '../../physics/metric'
-import { INTEGRATOR_QUALITY, KERR_D_TAU, KERR_STEPS, type QualityLevel } from '../../physics/renderQuality'
+import { INTEGRATOR_QUALITY, type QualityLevel } from '../../physics/renderQuality'
 
 const SPHERE_RADIUS = 500
 // The "ray has escaped" threshold for the lensing integrators. This has to
@@ -18,10 +18,9 @@ const MAX_RAY_RADIUS = 400
 // The disk briefly had physical thickness (roadmap: "un poco de espesor")
 // via a constant half-thickness fraction of innerRadius — see git history
 // (removed after it turned out to be the tipping point for GPU cost at high
-// spin/near-edge-on views; a per-step branch on top of Kerr's fixed
-// 6000-step integration adds up across the whole frame — see
-// checkDiskSegment's doc comment below and KERR_STEPS's in
-// renderQuality.ts). Reverted to the original infinitesimally-thin plane.
+// spin/near-edge-on views, back when this shader still ran a full Kerr
+// integrator for every spinning ray — see checkDiskSegmentY's doc comment
+// below). Reverted to the original infinitesimally-thin plane.
 // 4096x2048 rather than 2048x1024: gravitational lensing magnifies solid
 // angle without bound near the photon sphere (in the limit, a full ring of
 // sky maps to a single point), so any raster texture's 8-bit gradient steps
@@ -143,39 +142,41 @@ const VERTEX_SHADER = /* glsl */ `
   }
 `
 
-// Two ray tracers, selected by a uniform (spin/charge ~ 0 branches the same
-// way for every pixel, so this costs nothing extra in the Schwarzschild
-// case):
-//
-// - Schwarzschild (spin ~ 0 and charge ~ 0): mirrors physics/lensing.ts's
-//   traceSchwarzschildRay — the ray stays in a fixed 2D plane, integrated in
-//   φ. Much cheaper, used whenever there's no spin or charge to bend light
-//   off-plane / change Δ.
-// - Kerr–Newman (spin > 0 or charge > 0): mirrors physics/kerrLensing.ts's
-//   traceKerrRay — full Carter-constant geodesics via Mino-time RK4 on
-//   (r, θ, φ, w_r, w_θ). See that module for the derivation and the vitest
-//   coverage (Schwarzschild reduction at a=0/e=0, exact critical impact
-//   parameter for both spin and charge, frame-dragging asymmetry) this GLSL
-//   translation relies on.
+// One ray tracer (mirrors physics/lensing.ts's traceSchwarzschildRay — the
+// ray stays in a fixed 2D plane, integrated in φ), used for every ray
+// regardless of spin. Frame dragging isn't actually integrated: instead, per
+// physics/visualSpinLensing.ts's effectiveMassForRay, each ray's *mass* for
+// the bending integration alone is nudged up or down based on how aligned
+// its orbital plane is with the spin axis — calibrated so a fully-equatorial
+// ray reproduces the exact real Kerr critical impact parameter for that
+// spin and rotational sense, and a polar ray gets zero bias (frame dragging
+// genuinely vanishes on the axis). This is "Modo Visual" from the roadmap:
+// it reproduces the one visual signature of spin people actually recognize
+// — the shadow's asymmetric flattening — without ever running the full
+// Carter-constant Kerr–Newman integrator that used to live here (still
+// intact, exact, and tested at physics/kerrLensing.ts — just not what
+// renders the picture anymore, since its per-pixel cost was the real
+// ceiling on performance at high spin). Charge is ignored for bending
+// (visually negligible either way, per the roadmap's own reasoning) — it
+// still affects the shadow/disk *sizes* correctly, via the exact metric
+// formulas that already feed uHorizonRadius/uDiskInnerRadius/uDiskOuterRadius.
 const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uCameraPos;
   uniform sampler2D uBackgroundTexture;
   uniform float uMass;
   uniform float uSpin;
-  uniform float uCharge;
   uniform float uHorizonRadius;
   uniform float uMaxRadius;
   // Integrator quality (roadmap item 7): step *count* and step *size* are
   // both uniforms, driven from src/physics/renderQuality.ts's presets,
   // rather than the fixed consts this used to be. GLSL ES 1.00 requires a
-  // for-loop's bound to be a compile-time constant, so the loops below keep
-  // a fixed hard cap (comfortably above the "high" preset) and break early
+  // for-loop's bound to be a compile-time constant, so the loop below keeps
+  // a fixed hard cap (comfortably above the "high" preset) and breaks early
   // once the uniform step count is reached — the cap itself never changes,
-  // only how many iterations actually run before the break.
+  // only how many iterations actually run before the break. Applies
+  // uniformly regardless of spin now — see the file-level comment above.
   uniform int uSchwSteps;
   uniform float uSchwDPhi;
-  uniform int uKerrSteps;
-  uniform float uKerrDTau;
   // Disk bounds (roadmap item 8) — the ray tracers below check for a
   // crossing of the equatorial plane within these radii and, if found,
   // terminate early with the disk's analytic color instead of the
@@ -191,7 +192,6 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
-  const int MAX_STEPS_KERR_CAP = 6000;
   const float PI = 3.14159265359;
   const vec3 SPIN_AXIS = vec3(0.0, 1.0, 0.0);
   const float PEAK_TEMPERATURE_KELVIN = 14000.0;
@@ -258,10 +258,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   vec3 diskColor(vec3 position, float radius) {
     vec3 radial = position / radius;
     // Unit tangential (orbital-motion) direction, derived from d(position)/dφ
-    // in traceKerr's own (xRef, yRef) convention — see the comment at this
-    // function's call sites for the derivation. Using this rather than the
-    // old particle shader's convention keeps the disk co-rotating with
-    // prograde photons (L > 0), the standard physical configuration.
+    // in the world-space (x, z) convention traceSchwarzschild's own e1/e2
+    // basis reconstructs positions in. Using this rather than the old
+    // particle shader's convention keeps the disk co-rotating with prograde
+    // photons (L > 0), the standard physical configuration.
     vec3 tangential = vec3(radial.z, 0.0, -radial.x);
     vec3 towardCamera = normalize(uCameraPos - position);
     float betaLineOfSight = orbitalSpeedGLSL(uMass, radius) * dot(tangential, towardCamera);
@@ -299,17 +299,17 @@ const FRAGMENT_SHADER = /* glsl */ `
   // Checks one segment of a Schwarzschild ray's step for a crossing of the
   // disk's plane (world-space y=0) within [innerRadius, outerRadius] — see
   // traceSchwarzschild's use of this (four segments per step, across its RK4
-  // stage points, mirroring checkDiskSegment for Kerr's θ) for why a single
-  // per-step endpoint check isn't enough.
+  // stage points) for why a single per-step endpoint check isn't enough.
   //
   // The disk briefly had physical thickness (two faces, a filled slab
   // instead of an infinitesimal plane) — reverted after it turned out to be
-  // the tipping point for GPU cost at high spin/near-edge-on views (an
-  // already load-bearing constraint here, see KERR_STEPS's doc comment in
-  // renderQuality.ts): every extra per-step branch on top of Kerr's fixed
-  // 6000-step integration adds up across the whole frame. Given this is
-  // fundamentally an educational/visual simulator, a flat disk that renders
-  // smoothly beats a thick one that doesn't render at all.
+  // the tipping point for GPU cost at high spin/near-edge-on views, back
+  // when this shader still ran a full Carter-constant Kerr integrator for
+  // every spinning ray (see the file-level comment above — that integrator
+  // is gone from rendering now, but the thickness feature was never
+  // revisited). Given this is fundamentally an educational/visual simulator,
+  // a flat disk that renders smoothly beats a thick one that doesn't render
+  // at all.
   bool checkDiskSegmentY(
     float aR, float aPhi, float bR, float bPhi,
     float e1y, float e2y,
@@ -327,7 +327,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     return true;
   }
 
-  vec3 traceSchwarzschild(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
+  // mass is a per-ray *effective* mass (see effectiveMassForRayGLSL below),
+  // not always uMass — only the bending integration uses it; disk/background
+  // color still use the real uMass (see diskColor, called by schwarzschildColor).
+  vec3 traceSchwarzschild(vec3 ro, vec3 rd, float mass, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
     diskHit = false;
     float r0 = length(ro);
     vec3 e1 = ro / r0;
@@ -355,19 +358,19 @@ const FRAGMENT_SHADER = /* glsl */ `
       float prevPhi = phi;
 
       float k1u = v;
-      float k1v = -u + 3.0 * uMass * u * u;
+      float k1v = -u + 3.0 * mass * u * u;
       float u2 = u + (uSchwDPhi * 0.5) * k1u;
       float v2 = v + (uSchwDPhi * 0.5) * k1v;
       float k2u = v2;
-      float k2v = -u2 + 3.0 * uMass * u2 * u2;
+      float k2v = -u2 + 3.0 * mass * u2 * u2;
       float u3 = u + (uSchwDPhi * 0.5) * k2u;
       float v3 = v + (uSchwDPhi * 0.5) * k2v;
       float k3u = v3;
-      float k3v = -u3 + 3.0 * uMass * u3 * u3;
+      float k3v = -u3 + 3.0 * mass * u3 * u3;
       float u4 = u + uSchwDPhi * k3u;
       float v4 = v + uSchwDPhi * k3v;
       float k4u = v4;
-      float k4v = -u4 + 3.0 * uMass * u4 * u4;
+      float k4v = -u4 + 3.0 * mass * u4 * u4;
 
       u += (uSchwDPhi / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
       v += (uSchwDPhi / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
@@ -422,331 +425,72 @@ const FRAGMENT_SHADER = /* glsl */ `
     return normalize(e1Comp * e1 + e2Comp * e2);
   }
 
-  // Θ(θ) and its derivative divide by sin²θ/sin³θ, which blow up as a ray's
-  // θ approaches the poles (looking straight along the spin axis) — for a
-  // genuine photon orbit with L≠0 this never actually happens (Θ would go
-  // negative first, forcing a turning point well before the pole), but
-  // floating-point roundoff right at that boundary can still send a stray
-  // ray through the singularity, producing a visible bright line straight
-  // up/down the spin axis. Clamping keeps every real trajectory unaffected
-  // (they never get this close to sin θ = 0) while killing the artifact.
-  float safeSin(float theta) {
-    float s = sin(theta);
-    return s >= 0.0 ? max(s, 1e-3) : min(s, -1e-3);
-  }
-
-  // Returns the equirectangular UV to sample directly from (theta, phi),
-  // rather than reconstructing a Cartesian direction and re-deriving UV
-  // from it via atan2/acos. That round trip is where the pole artifact
-  // actually came from: for a ray whose bent path swings close to the spin
-  // axis, sin(theta) shrinks toward zero, so its Cartesian x/z components
-  // (built from sinTheta*cos(phi)/sinTheta*sin(phi)) become vanishingly
-  // small — and re-extracting phi from atan2 of two near-zero floats is
-  // exactly where floating-point noise blows up into a visible seam
-  // (confirmed by feeding finalDir straight to the framebuffer as a color:
-  // the seam showed up as a literal discontinuity in the direction vector
-  // itself, not in capture/escape or in the texture lookup). Sampling
-  // straight from the already-smooth, already-accumulated phi sidesteps
-  // that reconstruction entirely — texture wrapping (RepeatWrapping on u)
-  // handles phi being outside [-π, π] for free.
-  // Checks one segment of a Kerr ray's step for a crossing of the equatorial
-  // plane (θ=π/2, y = r·cosθ since the spin axis is world Y) within
-  // [innerRadius, outerRadius] — see traceKerr's use of this (four segments
-  // per step, across its RK4 stage points) for why a single per-step
-  // endpoint check isn't enough. Takes explicit points rather than an array
-  // to stay clear of GLSL ES 1.00's restrictions on dynamically-indexed
-  // arrays.
-  //
-  // The disk briefly had physical thickness (two faces, a filled slab
-  // instead of an infinitesimal plane) — reverted after it turned out to be
-  // the tipping point for GPU cost at high spin/near-edge-on views (an
-  // already load-bearing constraint here, see KERR_STEPS's doc comment in
-  // renderQuality.ts): every extra per-step branch on top of Kerr's fixed
-  // 6000-step integration adds up across the whole frame. Given this is
-  // fundamentally an educational/visual simulator, a flat disk that renders
-  // smoothly beats a thick one that doesn't render at all.
-  bool checkDiskSegment(
-    float aR, float aTheta, float aPhi,
-    float bR, float bTheta, float bPhi,
-    vec3 xRef, vec3 yRef, float innerRadius, float outerRadius,
-    out float hitRadius, out vec3 hitPosition
-  ) {
-    float ay = aR * cos(aTheta);
-    float by = bR * cos(bTheta);
-    if (ay * by >= 0.0) return false;
-    float fraction = ay / (ay - by);
-    float r = aR + fraction * (bR - aR);
-    if (r < innerRadius || r > outerRadius) return false;
-    float phi = aPhi + fraction * (bPhi - aPhi);
-    hitRadius = r;
-    hitPosition = r * cos(phi) * xRef + r * sin(phi) * yRef;
-    return true;
-  }
-
-  vec2 traceKerr(vec3 ro, vec3 rd, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
-    diskHit = false;
-    float M = uMass;
-    float a = uSpin;
-    float e2 = uCharge * uCharge;
-
-    float r0 = length(ro);
-    vec3 rHat = ro / r0;
-    vec3 xRef = normalize(vec3(1.0, 0.0, 0.0) - SPIN_AXIS * dot(vec3(1.0, 0.0, 0.0), SPIN_AXIS));
-    vec3 yRef = cross(SPIN_AXIS, xRef);
-
-    float theta0 = acos(clamp(dot(rHat, SPIN_AXIS), -1.0, 1.0));
-    float phi0 = atan(dot(rHat, yRef), dot(rHat, xRef));
-
-    vec3 impactVec = cross(ro, rd);
-    float L = dot(impactVec, SPIN_AXIS);
-    float Q = max(0.0, dot(impactVec, impactVec) - L * L);
-
-    vec3 thetaHat = normalize(rHat * dot(rHat, SPIN_AXIS) - SPIN_AXIS);
-    float rdRadial = dot(rd, rHat);
-    float rdTheta = dot(rd, thetaHat);
-
-    float r = r0;
-    float theta = theta0;
-    float phi = phi0;
-
-    // R(r0), Θ(θ0) evaluated directly (not the flat-space rdRadial/rdTheta
-    // approximation) — see kerrLensing.ts's doc comment for why this exact
-    // seeding matters (a tiny mismatch here is invisible far away but
-    // catastrophic once R(r) itself shrinks near the photon sphere).
-    float P0 = r0 * r0 + a * a - a * L;
-    float Delta0 = r0 * r0 - 2.0 * M * r0 + a * a + e2;
-    float R0 = P0 * P0 - Delta0 * ((L - a) * (L - a) + Q);
-    float c0 = cos(theta0);
-    float s0 = safeSin(theta0);
-    float Th0 = Q + c0 * c0 * (a * a - L * L / (s0 * s0));
-
-    float wr = sign(rdRadial) * sqrt(max(0.0, R0));
-    float wth = (rdTheta == 0.0 ? 1.0 : sign(rdTheta)) * sqrt(max(0.0, Th0));
-
-    bool escaped = false;
-
-    // Whether this ray has a real Θ(θ) turning point near the pole (a true
-    // bounce) or genuinely has none (L≈0, Θ = Q + a²cos²θ stays ≥ 0 all the
-    // way to the axis, so the ray passes over the pole into the opposite
-    // half of the sky, φ → φ + π) — see the matching comment in
-    // kerrLensing.ts's traceKerrRay for the full derivation and the visual
-    // artifact (a faint periodic chain of duplicate star images up the
-    // spin axis) this distinction fixes. Ray-invariant, so computed once
-    // outside the step loop.
-    const float POLE_GUARD = 0.02;
-    float sinGuard = sin(POLE_GUARD);
-    float cosGuard = cos(POLE_GUARD);
-    float thetaNearPole = Q + cosGuard * cosGuard * (a * a - L * L / (sinGuard * sinGuard));
-    bool isPoleCrossing = thetaNearPole > 0.0;
-
-    for (int i = 0; i < MAX_STEPS_KERR_CAP; i++) {
-      if (i >= uKerrSteps) break;
-      float prevR = r;
-      float prevTheta = theta;
-      float prevPhi = phi;
-
-      // derivatives(r, theta, wr, wth) -> (dr, dth, dphi, dwr, dwth), inlined
-      // four times for the RK4 stages.
-      float k1r = wr;
-      float k1th = wth;
-      float s1 = safeSin(theta); float s12 = s1 * s1; float c1 = cos(theta);
-      float Delta1 = r * r - 2.0 * M * r + a * a + e2;
-      float P1 = r * r + a * a - a * L;
-      float RmL1 = (L - a) * (L - a) + Q;
-      float k1dphi = -(a - L / s12) + (a / Delta1) * P1;
-      float k1dwr = (4.0 * r * P1 - 2.0 * (r - M) * RmL1) / 2.0;
-      float k1dwth = (2.0 * c1 * (L * L / (s1 * s1 * s1) - a * a * s1)) / 2.0;
-
-      float r2 = r + (uKerrDTau * 0.5) * k1r;
-      float th2 = theta + (uKerrDTau * 0.5) * k1th;
-      float wr2 = wr + (uKerrDTau * 0.5) * k1dwr;
-      float wth2 = wth + (uKerrDTau * 0.5) * k1dwth;
-      float k2r = wr2;
-      float k2th = wth2;
-      float s2_ = safeSin(th2); float s22 = s2_ * s2_; float c2_ = cos(th2);
-      float Delta2 = r2 * r2 - 2.0 * M * r2 + a * a + e2;
-      float P2 = r2 * r2 + a * a - a * L;
-      float RmL2 = (L - a) * (L - a) + Q;
-      float k2dphi = -(a - L / s22) + (a / Delta2) * P2;
-      float k2dwr = (4.0 * r2 * P2 - 2.0 * (r2 - M) * RmL2) / 2.0;
-      float k2dwth = (2.0 * c2_ * (L * L / (s2_ * s2_ * s2_) - a * a * s2_)) / 2.0;
-
-      float r3 = r + (uKerrDTau * 0.5) * k2r;
-      float th3 = theta + (uKerrDTau * 0.5) * k2th;
-      float wr3 = wr + (uKerrDTau * 0.5) * k2dwr;
-      float wth3 = wth + (uKerrDTau * 0.5) * k2dwth;
-      float k3r = wr3;
-      float k3th = wth3;
-      float s3_ = safeSin(th3); float s32 = s3_ * s3_; float c3_ = cos(th3);
-      float Delta3 = r3 * r3 - 2.0 * M * r3 + a * a + e2;
-      float P3 = r3 * r3 + a * a - a * L;
-      float RmL3 = (L - a) * (L - a) + Q;
-      float k3dphi = -(a - L / s32) + (a / Delta3) * P3;
-      float k3dwr = (4.0 * r3 * P3 - 2.0 * (r3 - M) * RmL3) / 2.0;
-      float k3dwth = (2.0 * c3_ * (L * L / (s3_ * s3_ * s3_) - a * a * s3_)) / 2.0;
-
-      float r4 = r + uKerrDTau * k3r;
-      float th4 = theta + uKerrDTau * k3th;
-      float wr4 = wr + uKerrDTau * k3dwr;
-      float wth4 = wth + uKerrDTau * k3dwth;
-      float k4r = wr4;
-      float k4th = wth4;
-      float s4_ = safeSin(th4); float s42 = s4_ * s4_; float c4_ = cos(th4);
-      float Delta4 = r4 * r4 - 2.0 * M * r4 + a * a + e2;
-      float P4 = r4 * r4 + a * a - a * L;
-      float RmL4 = (L - a) * (L - a) + Q;
-      float k4dphi = -(a - L / s42) + (a / Delta4) * P4;
-      float k4dwr = (4.0 * r4 * P4 - 2.0 * (r4 - M) * RmL4) / 2.0;
-      float k4dwth = (2.0 * c4_ * (L * L / (s4_ * s4_ * s4_) - a * a * s4_)) / 2.0;
-
-      r += (uKerrDTau / 6.0) * (k1r + 2.0 * k2r + 2.0 * k3r + k4r);
-      theta += (uKerrDTau / 6.0) * (k1th + 2.0 * k2th + 2.0 * k3th + k4th);
-      phi += (uKerrDTau / 6.0) * (k1dphi + 2.0 * k2dphi + 2.0 * k3dphi + k4dphi);
-      wr += (uKerrDTau / 6.0) * (k1dwr + 2.0 * k2dwr + 2.0 * k3dwr + k4dwr);
-      wth += (uKerrDTau / 6.0) * (k1dwth + 2.0 * k2dwth + 2.0 * k3dwth + k4dwth);
-
-      // Disk plane (θ=π/2) crossing — see traceKerrRay's doc comment in
-      // physics/kerrLensing.ts for the full derivation, and in particular
-      // for why this checks the RK4 stage points (start → stage 2 → stage 3
-      // → stage 4 → end) rather than just this step's two endpoints or a
-      // linear subdivision of them. A same-step crossing near the photon
-      // sphere can otherwise alias away (found via visual QA as a literal
-      // notch bitten out of the lensed disk at moderate-to-high spin) —
-      // and linear interpolation between two same-side endpoints
-      // *cannot* reveal it no matter how finely subdivided, since it's
-      // monotonic between them by construction (confirmed empirically: an
-      // 8-point subdivision left the notch completely unchanged). The
-      // stage points r2/th2, r3/th3, r4/th4 above are already real
-      // derivative evaluations through the step (not interpolation), so a
-      // same-step dip that reaches one does show up; phi2/phi3/phi4 here
-      // cost only three extra multiply-adds since k1dphi/k2dphi/k3dphi are
-      // already computed above. Checked before the POLE_GUARD block below,
-      // which only ever adjusts theta near the poles (far from π/2) and is
-      // irrelevant either way.
-      if (uDiskInnerRadius > 0.0) {
-        float phi2 = phi + (uKerrDTau * 0.5) * k1dphi;
-        float phi3 = phi + (uKerrDTau * 0.5) * k2dphi;
-        float phi4 = phi + uKerrDTau * k3dphi;
-
-        float hitR;
-        vec3 hitPos;
-        if (
-          checkDiskSegment(prevR, prevTheta, prevPhi, r2, th2, phi2, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r2, th2, phi2, r3, th3, phi3, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r3, th3, phi3, r4, th4, phi4, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos) ||
-          checkDiskSegment(r4, th4, phi4, r, theta, phi, xRef, yRef, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPos)
-        ) {
-          diskHit = true;
-          diskRadius = hitR;
-          diskPosition = hitPos;
-          captured = false;
-          return vec2(0.0);
-        }
-      }
-
-      // A real photon orbit with L≠0 turns around before ever reaching the
-      // pole (Θ(θ) hits zero first) — but a single RK4 step can overshoot
-      // past that turning point numerically near the singularity. Reflect
-      // theta/wth like a wall there instead of letting the ray punch
-      // through, which otherwise shows up as a bright seam along the spin
-      // axis. When there's no real turning point nearby (isPoleCrossing,
-      // computed once above), the ray is genuinely passing over the pole
-      // into the opposite half of the sky, so φ picks up an extra π.
-      if (theta < POLE_GUARD) {
-        theta = 2.0 * POLE_GUARD - theta; wth = -wth;
-        if (isPoleCrossing) phi += PI;
-      }
-      if (theta > PI - POLE_GUARD) {
-        theta = 2.0 * (PI - POLE_GUARD) - theta; wth = -wth;
-        if (isPoleCrossing) phi += PI;
-      }
-
-      if (r < uHorizonRadius || !(r == r)) { captured = true; return vec2(0.0); }
-      if (r > uMaxRadius) { escaped = true; break; }
-    }
-
-    if (!escaped) { captured = true; return vec2(0.0); }
-
-    captured = false;
-    return vec2(phi / (2.0 * PI) + 0.5, clamp(theta, 0.0, PI) / PI);
-  }
-
-  // Samples the background for a ray handled by the pure-mass Schwarzschild
-  // tracer — used only when there's no spin or charge at all (a > 0 or
-  // e > 0 always goes through kerrColor below, everywhere on the sky,
-  // including near the poles; see that function's comment for why).
-  vec3 schwarzschildColor(vec3 ro, vec3 rd, out bool captured) {
+  vec3 schwarzschildColor(vec3 ro, vec3 rd, float mass, out bool captured) {
     bool diskHit;
     vec3 diskPosition;
     float diskRadius;
-    vec3 finalDir = traceSchwarzschild(ro, rd, captured, diskHit, diskPosition, diskRadius);
+    vec3 finalDir = traceSchwarzschild(ro, rd, mass, captured, diskHit, diskPosition, diskRadius);
     if (diskHit) return diskColor(diskPosition, diskRadius);
     if (captured) return vec3(0.0);
     return texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
   }
 
-  // Samples the background for a ray handled by the full Kerr–Newman
-  // tracer, including the poleFade treatment for the background texture's
-  // own (unrelated) pole degeneracy below.
-  //
-  // An earlier version of this file routed rays whose trajectory swings
-  // close to the spin axis to the Schwarzschild tracer instead, reasoning
-  // that frame dragging vanishes on-axis so ignoring spin there is a safe
-  // approximation, precisely where the Kerr integrator's Θ(θ) (with its
-  // 1/sin³θ terms) was assumed least reliable. That fallback was itself the
-  // bug, not the fix: the two tracers generally land on a *different* final
-  // (θ,φ) for the same ray (frame dragging is small near the axis, but not
-  // exactly zero off it, and the two integrators don't otherwise agree
-  // pixel-for-pixel), so wherever the switch condition crossed there was a
-  // visible seam between two differently-sampled patches of sky. Tried as a
-  // hard switch, this showed up as a wedge spanning the whole frame (fixed
-  // by also requiring a small impact parameter — see git history); tried
-  // again as a smoothly-feathered blend confined close to the hole, it
-  // still showed up as a pair of dark "hourglass cones" reaching out from
-  // the poles, because the two tracers' predicted sky directions disagree
-  // by tens of degrees right at the boundary, not by noise-level amounts —
-  // no amount of feathering hides a disagreement that large. Verified (by
-  // temporarily forcing every spinning/charged ray through this function
-  // alone, no fallback at all) that the direct-UV-sampling fix and the
-  // POLE_GUARD reflection inside traceKerr, on their own, are already
-  // numerically stable enough near the axis — the fallback was solving a
-  // problem that a previous fix had already solved, and only introducing a
-  // new one.
-  vec3 kerrColor(vec3 ro, vec3 rd, out bool captured) {
-    bool diskHit;
-    vec3 diskPosition;
-    float diskRadius;
-    vec2 uv = traceKerr(ro, rd, captured, diskHit, diskPosition, diskRadius);
-    if (diskHit) return diskColor(diskPosition, diskRadius);
-    if (captured) return vec3(0.0);
+  // Kerr's photon sphere radius at charge = 0 (Bardeen 1972) — mirrors
+  // physics/orbits.ts's photonSphereRadius, charge-zero branch only (Modo
+  // Visual ignores charge's effect on bending entirely — see the file-level
+  // comment above). directionSign is -1 for prograde, +1 for retrograde,
+  // matching that module's own convention exactly. Named directionSign
+  // rather than "sign" to avoid shadowing GLSL's built-in sign() function.
+  float photonSphereRadiusGLSL(float mass, float spin, float directionSign) {
+    float aRatio = spin / mass;
+    return 2.0 * mass * (1.0 + cos((2.0 / 3.0) * acos(directionSign * aRatio)));
+  }
 
-    // An equirectangular texture is mathematically degenerate exactly at
-    // its poles (every u maps to the same physical point when v is 0 or 1),
-    // and rays whose bent path swings close to the spin axis land right in
-    // that degenerate strip — any leftover floating-point noise in exactly
-    // which u they land on reads as a bright seam, and it's most visible
-    // wherever it happens to cross a bright part of the texture (a star
-    // field pixel doesn't show it; the lensed galaxy glow does). Rather
-    // than chase that noise further inside the delicate RK4 integration,
-    // fade the sample to black right at the poles — a sliver of solid
-    // angle nobody would notice missing, in exchange for never showing the
-    // seam at all.
-    float sinThetaFinal = sin(uv.y * PI);
-    float poleFade = smoothstep(0.0, 0.08, sinThetaFinal);
-    return texture2D(uBackgroundTexture, uv).rgb * poleFade;
+  // Exact equatorial critical impact parameter for a spinning hole — mirrors
+  // physics/orbits.ts's criticalImpactParameter, spin > 0 branch (charge = 0
+  // here always). See that function's doc comment for the derivation and
+  // for why exact extremal spin (a = mass) needs the denom guard below: Δ
+  // and (r_ph − mass) both vanish together there for the prograde direction,
+  // a genuine removable singularity (the true limit is finite) that plain
+  // division would turn into 0/0.
+  float criticalImpactParameterGLSL(float mass, float spin, float directionSign) {
+    float rph = photonSphereRadiusGLSL(mass, spin, directionSign);
+    float denom = rph - mass;
+    float delta = rph * rph - 2.0 * mass * rph + spin * spin;
+    float p = abs(denom) < 1e-9 ? 0.0 : (2.0 * rph * delta) / denom;
+    return (rph * rph + spin * spin - p) / spin;
+  }
+
+  // Effective mass for this ray's bending integration alone — mirrors
+  // physics/visualSpinLensing.ts's effectiveMassForRay exactly (see that
+  // module's doc comment for the full calibration rationale: exact at the
+  // pole, exact at the equator, linearly interpolated in |sinAngle| between
+  // them). sinAngle = 0 collapses the (equatorialMass - mass) term to zero
+  // via the final multiply, so no separate branch is needed for the polar
+  // case the way the TS version has (that one exists for clean, exact-value
+  // test assertions, not because the math needs it here).
+  float effectiveMassForRayGLSL(float mass, float spin, float sinAngle) {
+    if (spin <= 0.0) return mass;
+    float directionSign = sinAngle > 0.0 ? -1.0 : 1.0;
+    float bCritReal = abs(criticalImpactParameterGLSL(mass, spin, directionSign));
+    float equatorialMass = (bCritReal / (3.0 * sqrt(3.0))) * mass;
+    return mass + (equatorialMass - mass) * abs(sinAngle);
   }
 
   void main() {
     vec3 rd = normalize(vWorldPos - uCameraPos);
 
-    if (uSpin < 1e-4 && uCharge < 1e-4) {
-      bool captured = false;
-      gl_FragColor = vec4(schwarzschildColor(uCameraPos, rd, captured), 1.0);
-      return;
-    }
+    // How "equatorial" this specific ray's orbital plane is relative to the
+    // spin axis — see effectiveMassForRayGLSL / the file-level comment above
+    // for what this drives (the shadow's asymmetric flattening, standing in
+    // for a real Kerr integration).
+    vec3 impactVec = cross(uCameraPos, rd);
+    float bLen = length(impactVec);
+    float sinAngle = bLen > 1e-9 ? dot(impactVec, SPIN_AXIS) / bLen : 0.0;
+    float effectiveMass = effectiveMassForRayGLSL(uMass, uSpin, sinAngle);
 
     bool captured = false;
-    gl_FragColor = vec4(kerrColor(uCameraPos, rd, captured), 1.0);
+    gl_FragColor = vec4(schwarzschildColor(uCameraPos, rd, effectiveMass, captured), 1.0);
   }
 `
 
@@ -779,20 +523,16 @@ export function LensedBackground({
       uBackgroundTexture: { value: texture },
       uMass: { value: params.mass },
       uSpin: { value: params.spin },
-      uCharge: { value: params.charge },
       uHorizonRadius: { value: horizonRadius },
       uMaxRadius: { value: MAX_RAY_RADIUS },
       uSchwSteps: { value: INTEGRATOR_QUALITY[quality].schwSteps },
       uSchwDPhi: { value: INTEGRATOR_QUALITY[quality].schwDPhi },
-      // Not quality-dependent — see renderQuality.ts's doc comment on KERR_STEPS.
-      uKerrSteps: { value: KERR_STEPS },
-      uKerrDTau: { value: KERR_D_TAU },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
     }),
-    [texture, flowTexture, params.mass, params.spin, params.charge, horizonRadius, quality, disk],
+    [texture, flowTexture, params.mass, params.spin, horizonRadius, quality, disk],
   )
 
   useFrame((state) => {
@@ -801,15 +541,12 @@ export function LensedBackground({
     material.uniforms.uCameraPos.value.copy(camera.position)
     material.uniforms.uMass.value = params.mass
     material.uniforms.uSpin.value = params.spin
-    material.uniforms.uCharge.value = params.charge
     material.uniforms.uHorizonRadius.value = horizonRadius
     material.uniforms.uMaxRadius.value = MAX_RAY_RADIUS
     material.uniforms.uTime.value = state.clock.elapsedTime
     const preset = INTEGRATOR_QUALITY[quality]
     material.uniforms.uSchwSteps.value = preset.schwSteps
     material.uniforms.uSchwDPhi.value = preset.schwDPhi
-    material.uniforms.uKerrSteps.value = KERR_STEPS
-    material.uniforms.uKerrDTau.value = KERR_D_TAU
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
   })
