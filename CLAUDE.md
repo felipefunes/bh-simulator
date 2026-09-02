@@ -527,38 +527,77 @@ clasificación del caso) de forma aislada del render.
      turbulencia claramente animado (dos capturas separadas por unos segundos
      muestran el patrón desplazado), con el streaking característico de
      rotación diferencial más marcado cerca del borde interno.
-9. **Modo Visual vs. Riguroso** (idea del usuario, pendiente de implementar).
-   Motivación: éste es ante todo un simulador *educativo/visual* — nadie está
-   mirando las ecuaciones, están mirando el render — y aun con `KERR_STEPS`
-   fijo en un valor alto (ítem 8), el usuario sigue sintiendo que spin/carga
-   "no mejoran" tanto como Schwarzschild. Dado que (a) el frame dragging no es
-   algo que el usuario vaya a medir a simple vista, sólo notar cualitativamente,
-   y (b) el efecto visual de la carga eléctrica es casi imperceptible (y ni
-   siquiera está claro que agujeros negros cargados existan en la realidad),
-   tiene sentido simplificar la física para el caso común sin tirar el trabajo
-   riguroso ya hecho.
-   Propuesta (mía, aceptada en principio por el usuario, sin diseñar en
-   detalle todavía): agregar un modo "Riguroso" (el integrador Kerr–Newman
-   actual, geodésicas exactas vía constante de Carter, intacto tal cual está)
-   y un modo "Visual" (nuevo, probablemente default) que:
-   - Calcula horizonte/ergosfera/ISCO/esfera de fotones con las fórmulas
-     cerradas exactas que ya existen en `physics/metric.ts`/`physics/orbits.ts`
-     (instantáneas, no iterativas) — el tamaño de la sombra y del disco siguen
-     siendo Kerr–Newman correctos.
-   - Traza los rayos con el integrador Schwarzschild-2D ya robusto (el mismo
-     que nunca tuvo los problemas de precisión cerca de la esfera de fotones
-     que motivaron el ítem 8), sumándole un sesgo simple de frame dragging
-     (asimetría prógrado/retrógrado aproximada, sin resolver Carter) en vez de
-     integrar la ecuación completa en 4D.
-   - Ignora el efecto de la carga sobre la trayectoria del rayo por completo
-     en modo Visual (sólo afecta el tamaño del horizonte, vía las fórmulas
-     exactas) — coincide con la observación del usuario de que ese efecto es
-     casi invisible de todas formas.
-   Trade-off explícito: se pierde precisión pixel-perfect muy cerca de la
-   esfera de fotones a cambio de robustez total y velocidad — pero nada del
-   trabajo riguroso se pierde, queda intacto y seleccionable. PR propia, no
-   parte de otro ítem — todavía no se diseñó la fórmula exacta del sesgo de
-   frame dragging ni el nombre/UI del selector.
+9. ✅ **Modo Visual** (idea del usuario). Motivación: éste es ante todo un
+   simulador *educativo/visual* — nadie está mirando las ecuaciones, están
+   mirando el render — y aun con `KERR_STEPS` fijo en un valor alto (ítem 8),
+   el spin seguía sintiéndose como que "rompe todo": con espesor de disco
+   (ítem 8) el costo extra por paso, multiplicado por 6000 pasos de Kerr y
+   por cada píxel, volvió a colapsar la performance. El usuario propuso
+   rescatar sólo el achatamiento asimétrico de la sombra (la señal visual de
+   spin que la gente realmente reconoce a simple vista) en vez de toda la
+   física detrás, y ver si eso alcanzaba para dejar de romper la performance.
+   - **`physics/orbits.ts`**: nueva función `criticalImpactParameter`
+     (promovida desde un helper que ya existía sólo en
+     `kerrLensing.test.ts`) — el parámetro de impacto crítico ecuatorial
+     exacto, prógrado/retrógrado, derivado de la condición de doble raíz
+     R(r_ph)=R'(r_ph)=0 sobre la esfera de fotones ya verificada. A spin=0 usa
+     la fórmula de Reissner–Nordström (se reduce a 3√3M con carga=0 también);
+     a spin≠0 divide por spin, lo que en el límite extremal exacto (a=M,
+     prógrado) da 0/0 porque Δ y (r_ph−M) se anulan juntos — un límite
+     genuinamente finito (2M) que floating-point puro puede convertir en NaN.
+     Se resuelve directo (`P=0` cuando el denominador es exactamente 0, válido
+     porque Δ también tiende a 0 ahí). Testeado contra los valores extremales
+     conocidos de la literatura (prógrado 2M, retrógrado 7M a spin=M).
+   - **`physics/visualSpinLensing.ts`** (nuevo módulo): `effectiveMassForRay`
+     calcula, para cada rayo, una masa *efectiva* que alimenta al integrador
+     de Schwarzschild — de otro modo intacto — en vez de la masa real, sólo
+     para la parte de curvatura/captura. Calibrado (no una constante
+     inventada) para que, en un rayo puramente ecuatorial (`sinAngle=±1`,
+     "qué tan ecuatorial es el plano orbital de este rayo respecto al eje de
+     spin"), la propia fórmula de Schwarzschild (3√3·masa_efectiva) reproduzca
+     *exactamente* el parámetro de impacto crítico real de Kerr para ese spin
+     y sentido — y en un rayo polar (`sinAngle=0`) devuelve la masa real sin
+     sesgo, porque el frame dragging se anula genuinamente sobre el eje.
+     Entre polo y ecuador, interpola linealmente en `|sinAngle|` — real GR no
+     interpola así, pero es la aproximación deliberada "menos rigurosa, más
+     visual" que se pidió. `traceVisualSpinRay` arma el mismo tipo de wrapper
+     3D que `kerrLensing.ts` (misma base e1/e2, mismo cálculo de L vía
+     `cross(cameraPos, rayDir)·spinAxis`), pero llamando al integrador de
+     `lensing.ts` sin tocarlo. La carga se ignora por completo para la
+     curvatura (sólo afecta horizonte/disco vía las fórmulas exactas de
+     siempre) — coincide con la observación original del usuario de que ese
+     efecto es casi invisible de todas formas.
+   - **`LensedBackground.tsx`**: se eliminó el integrador Kerr–Newman completo
+     del shader (Carter constant, Mino time, `POLE_GUARD`, `uKerrSteps`/
+     `uKerrDTau`, `uCharge` — todo el bloque, no sólo dejado de usar) y se
+     reemplazó por una traducción directa de `effectiveMassForRay`
+     (`photonSphereRadiusGLSL`/`criticalImpactParameterGLSL`/
+     `effectiveMassForRayGLSL`) que alimenta al mismo `traceSchwarzschild` de
+     siempre para *todo* rayo, sin importar el spin. `physics/kerrLensing.ts`
+     queda intacto, testeado, sin usar para renderizar — la referencia
+     rigurosa que el usuario pidió no perder, para quien corra esto en una
+     máquina más potente o quiera extender la física más adelante.
+   - Efecto directo en performance: el selector de calidad (ítem 7), antes
+     limitado a Schwarzschild puro, ahora aplica parejo sin importar el spin
+     — un agujero con spin ya no es un caso especial más caro, exactamente el
+     problema que motivó este ítem.
+   - Verificado en vitest: `criticalImpactParameter` (incluyendo el caso
+     extremal exacto sin NaN), `effectiveMassForRay` (reduce a la masa real a
+     spin=0 y a sinAngle=0; en `sinAngle=±1` iguala 3√3·masa_efectiva al
+     parámetro de impacto crítico real; interpola linealmente entre medio), y
+     `traceVisualSpinRay` (reproduce el umbral de Schwarzschild a spin=0;
+     muestra la asimetría de achatamiento — un rayo ecuatorial exactamente en
+     el umbral real es capturado prógrado pero escapa retrógrado; un rayo
+     puramente polar queda sin sesgo a cualquier spin; el cruce del disco
+     sigue funcionando). Build y lint limpios. Pendiente: confirmación visual
+     en navegador (sesión sin conexión a la extensión de Chrome en el momento
+     de este cambio).
+   - Alcance deliberado, no un olvido: no se agregó un selector "Visual" vs.
+     "Riguroso" en el sidebar — este PR reemplaza directamente qué renderiza
+     el shader, sin dejar ambos caminos seleccionables. Si en algún momento
+     hace falta el modo riguroso real (máquina más potente, o verificar
+     precisión), sigue ahí intacto en `physics/kerrLensing.ts`; conectarlo de
+     nuevo al shader como una opción sería trabajo futuro, no incluido acá.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
