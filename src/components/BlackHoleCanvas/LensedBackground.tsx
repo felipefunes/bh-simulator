@@ -311,8 +311,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     float flowU = flowPhi / (2.0 * PI) + 0.5;
     float flowV = clamp((radius - uDiskInnerRadius) / max(1e-6, uDiskOuterRadius - uDiskInnerRadius), 0.0, 1.0);
     float flow = texture2D(uDiskFlowTexture, vec2(flowU, flowV)).r;
-    float edgeFade = outerEdgeFadeGLSL(uDiskOuterRadius, uDiskOuterFadeWidth, radius);
-    return color * (0.7 + 0.6 * flow) * edgeFade;
+    // No fade multiply here — the caller composites this against whatever's
+    // behind the disk at this pixel (mix(behindColor, diskColor, diskFade)),
+    // not toward black. See traceSchwarzschild's diskFade doc comment.
+    return color * (0.7 + 0.6 * flow);
   }
 
   vec2 equirectUv(vec3 dir) {
@@ -355,8 +357,20 @@ const FRAGMENT_SHADER = /* glsl */ `
   // mass is a per-ray *effective* mass (see effectiveMassForRayGLSL below),
   // not always uMass — only the bending integration uses it; disk/background
   // color still use the real uMass (see diskColor, called by schwarzschildColor).
-  vec3 traceSchwarzschild(vec3 ro, vec3 rd, float mass, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius) {
+  //
+  // diskFade (1 = fully opaque, 0 = fully faded) lets the caller composite
+  // the disk hit against whatever's actually behind it at this pixel,
+  // instead of the fade darkening the disk color toward black regardless of
+  // background — found via user feedback that the fade looked wrong
+  // specifically over the bright lensed-galaxy glow, where a black-tinted
+  // edge reads as a dark ring cutting into the glow rather than a soft
+  // dissipation into it. An opaque hit (diskFade>=0.999, the common case)
+  // still returns immediately, same as before — the ray only keeps
+  // integrating past a *soft* edge hit, to find the color that would show
+  // through it, which schwarzschildColor then mix()es with the disk color.
+  vec3 traceSchwarzschild(vec3 ro, vec3 rd, float mass, out bool captured, out bool diskHit, out vec3 diskPosition, out float diskRadius, out float diskFade) {
     diskHit = false;
+    diskFade = 1.0;
     float r0 = length(ro);
     vec3 e1 = ro / r0;
     vec3 tangential = rd - dot(rd, e1) * e1;
@@ -411,7 +425,11 @@ const FRAGMENT_SHADER = /* glsl */ `
       // stages 2 and 3 both land at exactly prevPhi + dPhi/2 and stage 4 at
       // exactly prevPhi + dPhi — no interpolation needed for φ, only r
       // (=1/u2, 1/u3, 1/u4) differs between them.
-      if (uDiskInnerRadius > 0.0) {
+      // !diskHit: once a crossing (soft or opaque) is found, stop looking
+      // for further ones — same "first hit wins" semantics as before, just
+      // applied as a guard here instead of an early return, since a soft
+      // hit no longer returns immediately (see diskFade's doc comment above).
+      if (uDiskInnerRadius > 0.0 && !diskHit) {
         float prevR = 1.0 / prevU;
         float r2 = 1.0 / u2;
         float r3 = 1.0 / u3;
@@ -421,8 +439,8 @@ const FRAGMENT_SHADER = /* glsl */ `
         float newR = 1.0 / u;
 
         // Fed outerRadius + fade width so a hit still registers inside the
-        // fade zone — diskColor's own outerEdgeFadeGLSL call is what
-        // actually dims it toward zero brightness, not this bound.
+        // fade zone — diskFade below (not this bound) is what determines
+        // how much of the disk color actually shows through.
         float outerBoundWithFade = uDiskOuterRadius + uDiskOuterFadeWidth;
         float hitR;
         float hitPhi;
@@ -435,8 +453,14 @@ const FRAGMENT_SHADER = /* glsl */ `
           diskHit = true;
           diskRadius = hitR;
           diskPosition = hitR * cos(hitPhi) * e1 + hitR * sin(hitPhi) * e2;
-          captured = false;
-          return rd;
+          diskFade = outerEdgeFadeGLSL(uDiskOuterRadius, uDiskOuterFadeWidth, hitR);
+          if (diskFade >= 0.999) {
+            captured = false;
+            return rd;
+          }
+          // Soft edge hit: keep integrating (no disk checks from here on,
+          // guarded by !diskHit above) so the loop below naturally finds
+          // whatever's behind — captured, or the background direction.
         }
       }
 
@@ -458,10 +482,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     bool diskHit;
     vec3 diskPosition;
     float diskRadius;
-    vec3 finalDir = traceSchwarzschild(ro, rd, mass, captured, diskHit, diskPosition, diskRadius);
-    if (diskHit) return diskColor(diskPosition, diskRadius);
-    if (captured) return vec3(0.0);
-    return texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
+    float diskFade;
+    vec3 finalDir = traceSchwarzschild(ro, rd, mass, captured, diskHit, diskPosition, diskRadius, diskFade);
+    vec3 behindColor = captured ? vec3(0.0) : texture2D(uBackgroundTexture, equirectUv(finalDir)).rgb;
+    if (diskHit) return mix(behindColor, diskColor(diskPosition, diskRadius), diskFade);
+    return behindColor;
   }
 
   // Kerr's photon sphere radius at charge = 0 (Bardeen 1972) — mirrors
