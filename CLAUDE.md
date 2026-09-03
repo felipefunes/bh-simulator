@@ -704,20 +704,100 @@ clasificación del caso) de forma aislada del render.
         una estrella asomando justo en la zona de fade) en vez de un
         borde oscurecido. 82/82 tests, build y lint limpios.
 
+11. ✅ **Fix del artefacto de spin en Modo Visual** (reportado por el usuario:
+    "el issue del spin. Sigue habiendo comportamientos extraños al aumentar el
+    spin", con el pedido explícito de simplificar la física aún más si hacía
+    falta para eliminarlo — "iría simplificando la física a un punto en que
+    sólo se incorporen los cambios visuales si es que se puede"). Dos bugs
+    distintos, encontrados y resueltos en secuencia:
+    - **Bug 1 — `effectiveMassForRay` (la primera versión de Modo Visual,
+      ítem 9) producía arcos concéntricos punteados/aliased a spin alto.**
+      Dos intentos de ajuste fallaron sin cambiar el artefacto en absoluto:
+      suavizar el blend con `sinAngle²` (por si el kink de derivada en
+      `|sinAngle|` en el polo fuera la causa) y amortiguar el sesgo al 30% (por
+      si la magnitud fuera la causa). Ninguno de los dos cambió el artefacto ni
+      un poco — la causa real no era la suavidad ni la magnitud del sesgo, sino
+      variar la *masa* en absoluto cerca de la esfera de fotones: las
+      geodésicas nulas que dan varias vueltas ahí son extremadamente sensibles
+      a la masa, así que hasta una variación suave y continua por píxel separa
+      píxeles vecinos en números de vuelta completamente distintos.
+      Presentado al usuario, quien confirmó explícitamente seguir con un
+      rediseño de un solo lado (`AskUserQuestion`, opción elegida: "Sí, un solo
+      lado (recomendado)") en vez de seguir iterando sobre la variación de masa.
+      - **Rediseño**: `physics/visualSpinLensing.ts` ya no varía la masa en
+        absoluto — todo rayo se traza con la masa real, byte a byte igual que
+        spin=0 (ya probado libre de artefactos). El spin sólo entra como una
+        corrección posterior a la decisión final de captura/escape: si el
+        parámetro de impacto cae bajo `retrogradeCriticalImpactParameter`
+        (nueva función, sesgada sólo para rayos retrógrados —
+        `sinAngle < 0` — interpolando `sinAngle²` hacia el valor crítico real
+        de Kerr en el ecuador retrógrado), un rayo que habría escapado se
+        reclasifica como capturado. Los rayos prógrados/polares no cambian
+        nunca (siempre el umbral de Schwarzschild puro). Trade-off aceptado a
+        propósito: la sombra sólo crece del lado retrógrado — no puede encoger
+        limpiamente del lado prógrado (un rayo genuinamente capturado no tiene
+        una trayectoria de escape "falsa" con la que reemplazarlo con
+        principios). `LensedBackground.tsx` recibió la traducción GLSL
+        equivalente (`retrogradeCriticalImpactParameterGLSL`), reemplazando
+        `effectiveMassForRayGLSL` (eliminada) en `main()`.
+      - Testeado en vitest (`visualSpinLensing.test.ts`, reescrito): reduce a
+        Schwarzschild puro a spin=0; rayos prógrados no sesgados a ningún spin
+        (incluso entre el umbral real prógrado y el de Schwarzschild); rayos
+        retrógrados sí muestran el crecimiento de sombra (capturados entre el
+        umbral de Schwarzschild y el retrógrado real); rayo puramente polar sin
+        sesgo a cualquier spin; cruce del disco intacto.
+    - **Bug 2 — tras el rediseño, el artefacto (arcos/línea punteada) seguía
+      presente**, lo cual de hecho refutaba que la causa original
+      (`effectiveMassForRay`) fuera la causa de *este* artefacto visible en
+      particular, aunque el problema teórico que motivó el rediseño era real
+      igual. Diagnosticado por bisección — neutralizando una entrada
+      dependiente de spin a la vez, verificando en el navegador después de
+      cada una (mismo viewport, sin recargar, para evitar falsos positivos por
+      el tamaño de ventana variando entre `navigate`): override retrógrado
+      neutralizado (seguía) → `uHorizonRadius` forzado fijo (seguía) → disco
+      desactivado (el artefacto fuerte desaparecía, sólo quedaba un patrón
+      tenue y sin relación con el spin) → disco reactivado (el artefacto fuerte
+      volvía). Causa real: `BlackHoleCanvas.tsx` usa la ISCO real de Kerr
+      (`iscoRadius(params)`, que encoge hacia el horizonte a spin alto) para el
+      radio interno del disco, pero el chequeo de cruce del disco en el shader
+      corre sobre el rayo curvado por la esfera de fotones de Schwarzschild
+      pura (3M) — Modo Visual nunca varía eso. Cuando el borde interno del
+      disco encoge lo bastante para acercarse a esa esfera de fotones ya
+      desalineada, reaparece la misma clase de bug de "cruce de disco
+      sub-resuelto" que el PR 8 ya había arreglado una vez para el integrador
+      de Kerr (un disco con mordiscos/dentado).
+      - Fix: `MIN_DISK_INNER_RADIUS_TO_MASS_RATIO = 4` en
+        `BlackHoleCanvas.tsx` — el radio interno del disco es
+        `Math.max(iscoRadius(params) ?? ..., 4 * mass)`, un piso que mantiene
+        el disco a una distancia segura de la esfera de fotones de
+        Schwarzschild sin importar cuánto encoja la ISCO real con el spin.
+        Costo aceptado: el disco deja de encoger hasta el horizonte a spin
+        extremal como haría la ISCO real — se congela en ese piso en cambio.
+        Verificado probando primero un override total (`6 * mass`, ignorando
+        spin) para confirmar que el piso era la causa correcta, luego el
+        clamp menos drástico (`Math.max(ISCO real, 4*mass)`) — igual de
+        limpio, permitiendo algo de encogimiento real.
+    - Verificado en el navegador en el peor caso conocido (spin=1.00, calidad
+      "Media" y "Alta"): sin arcos, sin línea punteada, sombra asimétrica
+      (crecimiento retrógrado) todavía visible — confirma que el rediseño de
+      un solo lado sigue intacto y que el fix es el del disco, no una reversión
+      del rediseño. 83/83 tests, build y lint limpios.
+
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
 
 ## Known issues
 
-- **Artefacto residual cerca del eje de spin** (línea punteada / arcos tenues, spin
-  alto + cámara en ángulo pronunciado): sobrevivió a cinco rondas de fixes reales
-  durante el PR 6 (cada una documentada arriba, en la sección de ese PR) y se aceptó
-  como limitación conocida en vez de seguir iterando indefinidamente. Detalle completo,
-  hipótesis pendientes y cómo reproducir en
-  [issue #7](https://github.com/felipefunes/bh-simulator/issues/7). Probablemente se
-  retome junto con el ítem 7 del roadmap (controles de calidad) o con una
-  reformulación del integrador de Kerr que evite la coordenada singular del polo
-  (sustitución μ=cosθ) en vez de parchar `POLE_GUARD` caso por caso.
+Ninguno conocido actualmente. El artefacto histórico cerca del eje de spin (línea
+punteada / arcos tenues a spin alto, [issue #7](https://github.com/felipefunes/bh-simulator/issues/7))
+quedó obsoleto por el reemplazo completo del integrador de Kerr por Modo Visual (ítem 9):
+la causa original (`POLE_GUARD`/la coordenada singular del polo θ en el integrador de
+Carter) ya no existe en absoluto en el código que renderiza — Modo Visual traza con el
+integrador 2D de Schwarzschild, que no tiene coordenada θ ni concepto de polo. Es una
+garantía estructural (el camino de código se eliminó, no se parchó) y no algo que haga
+falta re-verificar caso por caso. El ítem 11 documenta un artefacto visualmente similar
+pero de causa completamente distinta (un desajuste de radios entre el disco y la esfera
+de fotones), ya resuelto.
 
 ## Deploy
 
