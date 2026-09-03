@@ -6,6 +6,7 @@ import {
   diskTemperature,
   dopplerFactor,
   orbitalSpeed,
+  outerEdgeFade,
 } from './accretionDisk'
 
 describe('diskTemperature', () => {
@@ -98,5 +99,38 @@ describe('combinedRedshiftFactor / dopplerFactor', () => {
     // and only the gravitational sqrt(1-2M/r) factor remains.
     const largeR = 100000
     expect(combinedRedshiftFactor(mass, largeR, 0)).toBeCloseTo(1, 3)
+  })
+})
+
+describe('outerEdgeFade', () => {
+  const outerRadius = 10
+  const fadeWidth = 2
+
+  it('is exactly 1 at and inside outerRadius', () => {
+    expect(outerEdgeFade(outerRadius, fadeWidth, outerRadius)).toBe(1)
+    expect(outerEdgeFade(outerRadius, fadeWidth, outerRadius * 0.5)).toBe(1)
+  })
+
+  it('is exactly 0 at and beyond outerRadius + fadeWidth', () => {
+    expect(outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth)).toBe(0)
+    expect(outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth * 2)).toBe(0)
+  })
+
+  it('is exactly 0.5 at the midpoint of the fade zone (smoothstep symmetry)', () => {
+    expect(outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth / 2)).toBeCloseTo(0.5)
+  })
+
+  it('decreases monotonically across the fade zone', () => {
+    const a = outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth * 0.25)
+    const b = outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth * 0.5)
+    const c = outerEdgeFade(outerRadius, fadeWidth, outerRadius + fadeWidth * 0.75)
+    expect(a).toBeGreaterThan(b)
+    expect(b).toBeGreaterThan(c)
+  })
+
+  it('reproduces the original hard edge when fadeWidth <= 0', () => {
+    expect(outerEdgeFade(outerRadius, 0, outerRadius)).toBe(1)
+    expect(outerEdgeFade(outerRadius, 0, outerRadius + 0.001)).toBe(0)
+    expect(outerEdgeFade(outerRadius, -1, outerRadius + 0.001)).toBe(0)
   })
 })

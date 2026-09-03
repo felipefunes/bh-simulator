@@ -115,3 +115,18 @@ export function combinedRedshiftFactor(mass: number, r: number, betaLineOfSight:
 export function dopplerFactor(mass: number, r: number, betaLineOfSight: number): number {
   return 1 / combinedRedshiftFactor(mass, r, betaLineOfSight)
 }
+
+/**
+ * Smooth brightness falloff for the disk's outer edge — 1 at and inside
+ * outerRadius, smoothing down to 0 at outerRadius + fadeWidth, so it
+ * dissipates like dust instead of stopping at a razor-sharp cutoff. Purely
+ * a visual softening (a standard smoothstep, not a real density/optical-depth
+ * model) — the inner edge already fades physically via diskTemperature
+ * going to 0 at the ISCO, so this only ever applies to the outer edge.
+ * fadeWidth <= 0 reproduces the original hard edge exactly.
+ */
+export function outerEdgeFade(outerRadius: number, fadeWidth: number, r: number): number {
+  if (fadeWidth <= 0) return r <= outerRadius ? 1 : 0
+  const t = Math.max(0, Math.min(1, (r - outerRadius) / fadeWidth))
+  return 1 - t * t * (3 - 2 * t)
+}
