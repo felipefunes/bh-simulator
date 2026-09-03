@@ -673,6 +673,36 @@ clasificación del caso) de forma aislada del render.
       se ve como un degradado suave hacia la oscuridad, no una línea recta,
       confirmado en ambos lados de la elipse visible). 82/82 tests, build y
       lint limpios.
+    - **Bug encontrado en review**: el fade oscurecía el color del disco
+      hacia negro (`color * edgeFade`) sin importar qué hubiera detrás —
+      correcto contra el fondo vacío del espacio, pero sobre la mancha de
+      la galaxia lejana (brillante) esto se veía como un anillo oscuro
+      cortando el brillo en vez de una disolución suave hacia él. El
+      usuario lo notó directamente: "¿es posible que vaya a un rgba
+      transparente?" — el diagnóstico correcto: hacía falta mezclar con lo
+      que hay *detrás* del borde en ese píxel (el fondo real, estrellas o
+      mancha de galaxia), no oscurecer hacia negro.
+      - Fix: `traceSchwarzschild` gana un nuevo out-param `diskFade`. Un
+        cruce opaco (`diskFade>=0.999`, el caso común) sigue retornando de
+        inmediato como antes — cero cambio de comportamiento ni de costo
+        para la gran mayoría de píxeles. Un cruce en la zona de fade
+        (`diskFade<1`) ya NO retorna: sigue integrando (con los chequeos de
+        disco ahora deshabilitados para el resto de ese rayo, vía un guard
+        `!diskHit`) hasta encontrar su destino real — capturado, o la
+        dirección de escape hacia el fondo — exactamente lo que ese rayo
+        habría mostrado si el disco no lo hubiera interceptado ahí.
+        `diskColor()` ya no aplica el fade internamente; en cambio,
+        `schwarzschildColor()` compone explícitamente
+        `mix(colorDeFondo, colorDelDisco, diskFade)` — composición "over"
+        estándar, en vez de oscurecer.
+      - Costo: sólo los píxeles que caen en el anillo delgado de fade
+        (una fracción pequeña del borde exterior) pagan el costo de seguir
+        integrando después del cruce; el resto del disco (la gran mayoría,
+        `diskFade≈1`) no cambia en absoluto.
+      - Verificado en el navegador: sin errores de consola, con y sin
+        spin (0.98), el degradado ahora revela el fondo real (se confirmó
+        una estrella asomando justo en la zona de fade) en vez de un
+        borde oscurecido. 82/82 tests, build y lint limpios.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
