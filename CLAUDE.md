@@ -650,6 +650,29 @@ clasificación del caso) de forma aislada del render.
       horizontal simple (por ejemplo, evitar que dos labels se superpongan
       entre sí, o clamping vertical) — quedan como mejoras futuras si hacen
       falta.
+11. ✅ **Blur en el borde externo del disco** (pedido del usuario: "un poco
+    de blur al borde externo del disco, de manera que suavice la línea y se
+    parezca más a un disco de polvo"). `physics/accretionDisk.ts`: nueva
+    `outerEdgeFade(outerRadius, fadeWidth, r)` — un smoothstep estándar (no
+    un modelo real de densidad/profundidad óptica), 1 en y dentro de
+    `outerRadius`, bajando suave a 0 en `outerRadius + fadeWidth`. El borde
+    interno ya se atenúa físicamente (la temperatura de Shakura–Sunyaev cae
+    a 0 en la ISCO); esto sólo toca el externo, que antes cortaba en seco.
+    - `LensedBackground.tsx`: `checkDiskSegmentY` sigue detectando cruces
+      exactamente igual, pero alimentado con `uDiskOuterRadius +
+      uDiskOuterFadeWidth` en vez de sólo `uDiskOuterRadius` — así un cruce
+      dentro de la zona de fade todavía registra un hit (el fade sólo afecta
+      el brillo final en `diskColor`, vía `outerEdgeFadeGLSL`, no si hay hit
+      o no). `DISK_OUTER_FADE_RATIO = 0.15` (fracción de `outerRadius`,
+      mismo patrón que otros radios del disco — escala con el tamaño del
+      disco en vez de verse desproporcionado en masas/spins extremos).
+    - Verificado en vitest (`outerEdgeFade`: 1 dentro, 0 más allá de
+      `outerRadius + fadeWidth`, 0.5 exacto en el punto medio, monótono
+      entre medio, y el caso `fadeWidth <= 0` reproduce el corte duro
+      original exactamente) y en el navegador (el borde exterior del disco
+      se ve como un degradado suave hacia la oscuridad, no una línea recta,
+      confirmado en ambos lados de la elipse visible). 82/82 tests, build y
+      lint limpios.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).

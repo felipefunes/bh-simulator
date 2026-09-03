@@ -15,6 +15,14 @@ const SPHERE_RADIUS = 500
 // theta/phi for every pixel regardless of screen position, collapsing the
 // entire lensed background to a single sampled texture color.
 const MAX_RAY_RADIUS = 400
+// Outer-edge dust fade (roadmap: "un poco de blur al borde externo del
+// disco, de manera que se parezca más a un disco de polvo") — a fraction of
+// outerRadius rather than a fixed length, same reasoning as the disk's own
+// innerRadius/outerRadius ratio: scales with the disk's size across
+// different mass/spin combinations instead of looking too thin or too wide
+// at extreme values. See accretionDisk.ts's outerEdgeFade for the actual
+// falloff shape (a smoothstep, not a real density/optical-depth model).
+const DISK_OUTER_FADE_RATIO = 0.15
 // The disk briefly had physical thickness (roadmap: "un poco de espesor")
 // via a constant half-thickness fraction of innerRadius — see git history
 // (removed after it turned out to be the tipping point for GPU cost at high
@@ -185,6 +193,12 @@ const FRAGMENT_SHADER = /* glsl */ `
   // has 0 < innerRadius < outerRadius.
   uniform float uDiskInnerRadius;
   uniform float uDiskOuterRadius;
+  // Width of the smooth brightness falloff just beyond uDiskOuterRadius —
+  // see accretionDisk.ts's outerEdgeFade and diskColor's use of it below.
+  // The disk-crossing check (checkDiskSegmentY) is fed uDiskOuterRadius +
+  // this width, so a hit can still register inside the fade zone; the fade
+  // itself only affects brightness, not detection.
+  uniform float uDiskOuterFadeWidth;
   // Elapsed time (seconds) and a tileable procedural noise texture, for the
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
@@ -224,6 +238,16 @@ const FRAGMENT_SHADER = /* glsl */ `
     float gravitational = sqrt(max(1e-9, 1.0 - 2.0 * mass / r));
     float onePlusZ = (gamma * (1.0 - betaLineOfSight)) / gravitational;
     return 1.0 / onePlusZ;
+  }
+
+  // Mirrors src/physics/accretionDisk.ts's outerEdgeFade exactly — GLSL's
+  // built-in smoothstep does the same cubic (3t²-2t³) as the manual version
+  // there, so this just wires it up with the same fadeWidth<=0 hard-edge
+  // fallback (uDiskOuterFadeWidth is always > 0 in practice here, but this
+  // keeps the two implementations behaviorally identical, not just visually).
+  float outerEdgeFadeGLSL(float outerRadius, float fadeWidth, float r) {
+    if (fadeWidth <= 0.0) return r <= outerRadius ? 1.0 : 0.0;
+    return 1.0 - smoothstep(outerRadius, outerRadius + fadeWidth, r);
   }
 
   vec3 blackbodyColorGLSL(float temperatureKelvin) {
@@ -287,7 +311,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     float flowU = flowPhi / (2.0 * PI) + 0.5;
     float flowV = clamp((radius - uDiskInnerRadius) / max(1e-6, uDiskOuterRadius - uDiskInnerRadius), 0.0, 1.0);
     float flow = texture2D(uDiskFlowTexture, vec2(flowU, flowV)).r;
-    return color * (0.7 + 0.6 * flow);
+    float edgeFade = outerEdgeFadeGLSL(uDiskOuterRadius, uDiskOuterFadeWidth, radius);
+    return color * (0.7 + 0.6 * flow) * edgeFade;
   }
 
   vec2 equirectUv(vec3 dir) {
@@ -395,13 +420,17 @@ const FRAGMENT_SHADER = /* glsl */ `
         float phiEnd = prevPhi + uSchwDPhi;
         float newR = 1.0 / u;
 
+        // Fed outerRadius + fade width so a hit still registers inside the
+        // fade zone — diskColor's own outerEdgeFadeGLSL call is what
+        // actually dims it toward zero brightness, not this bound.
+        float outerBoundWithFade = uDiskOuterRadius + uDiskOuterFadeWidth;
         float hitR;
         float hitPhi;
         if (
-          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi) ||
-          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskInnerRadius, uDiskOuterRadius, hitR, hitPhi)
+          checkDiskSegmentY(prevR, prevPhi, r2, phiMid, e1.y, e2.y, uDiskInnerRadius, outerBoundWithFade, hitR, hitPhi) ||
+          checkDiskSegmentY(r2, phiMid, r3, phiMid, e1.y, e2.y, uDiskInnerRadius, outerBoundWithFade, hitR, hitPhi) ||
+          checkDiskSegmentY(r3, phiMid, r4, phiEnd, e1.y, e2.y, uDiskInnerRadius, outerBoundWithFade, hitR, hitPhi) ||
+          checkDiskSegmentY(r4, phiEnd, newR, phiEnd, e1.y, e2.y, uDiskInnerRadius, outerBoundWithFade, hitR, hitPhi)
         ) {
           diskHit = true;
           diskRadius = hitR;
@@ -529,6 +558,7 @@ export function LensedBackground({
       uSchwDPhi: { value: INTEGRATOR_QUALITY[quality].schwDPhi },
       uDiskInnerRadius: { value: disk?.innerRadius ?? 0 },
       uDiskOuterRadius: { value: disk?.outerRadius ?? 0 },
+      uDiskOuterFadeWidth: { value: disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
     }),
@@ -549,6 +579,7 @@ export function LensedBackground({
     material.uniforms.uSchwDPhi.value = preset.schwDPhi
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
+    material.uniforms.uDiskOuterFadeWidth.value = disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0
   })
 
   return (
