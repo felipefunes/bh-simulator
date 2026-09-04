@@ -704,7 +704,7 @@ clasificación del caso) de forma aislada del render.
         una estrella asomando justo en la zona de fade) en vez de un
         borde oscurecido. 82/82 tests, build y lint limpios.
 
-11. ✅ **Fix del artefacto de spin en Modo Visual** (reportado por el usuario:
+12. ✅ **Fix del artefacto de spin en Modo Visual** (reportado por el usuario:
     "el issue del spin. Sigue habiendo comportamientos extraños al aumentar el
     spin", con el pedido explícito de simplificar la física aún más si hacía
     falta para eliminarlo — "iría simplificando la física a un punto en que
@@ -782,6 +782,54 @@ clasificación del caso) de forma aislada del render.
       (crecimiento retrógrado) todavía visible — confirma que el rediseño de
       un solo lado sigue intacto y que el fix es el del disco, no una reversión
       del rediseño. 83/83 tests, build y lint limpios.
+13. ✅ **Anti-aliasing del borde del disco contra sí mismo** (reportado por el
+    usuario tras revisar el fix del blur del borde externo — ítem 11: "sigo
+    viendo el borde del disco negro [...] es que es difícil verlo contra el
+    espacio, pero contra sí mismo si se nota"). No era una regresión del fade
+    del ítem 11 (ese sigue funcionando: revela el fondo real, no oscurece a
+    negro) sino un fenómeno distinto, encontrado explorando varios ángulos de
+    cámara: cerca de la sombra, la lente gravitacional puede generar una
+    *imagen de orden superior* del disco (el lado lejano, curvado por encima
+    de la sombra) comprimida angularmente en apenas un puñado de píxeles de
+    pantalla. El shader dispara un solo rayo por píxel, así que la transición
+    real (continua en el espacio del parámetro de impacto) entre "el rayo cruza
+    el disco" y "el rayo escapa limpio" puede caer entera entre un píxel y el
+    siguiente — no hay forma de que se vea gradual con un solo muestreo, sea
+    cual sea el fade aplicado. Contra el fondo (espacio, ya oscuro) ese salto es
+    invisible; junto a otra parte del disco (brillante), se lee como un borde
+    negro duro — de ahí "contra sí mismo si se nota".
+    - Se presentaron tres opciones al usuario (`AskUserQuestion`): supersampling
+      en el shader, blur/glow de post-proceso general, o dejarlo (es una
+      "dark lane" real entre dos imágenes lensadas, el mismo fenómeno detrás de
+      las franjas oscuras de renders reales de agujeros negro). El usuario
+      eligió supersampling — ataca la causa (aliasing), a diferencia de un blur
+      general que suavizaría también el borde real de la sombra (una
+      discontinuidad física genuina que no debería difuminarse).
+    - `physics/renderQuality.ts`: nuevo campo `diskSupersamples` en
+      `IntegratorQuality` — 1 (sin cambio de costo/comportamiento) en
+      "Baja"/"Media", 5 en "Alta". Mismo patrón que `schwSteps`/`schwDPhi`: el
+      selector de calidad (ítem 7) es la palanca de costo vs. fidelidad, así
+      que el render por default no cambia.
+    - `LensedBackground.tsx`: el cuerpo de `main()` (trace + color + el
+      override retrógrado del ítem 12) se extrajo a `sampleColor(rd)`, ahora
+      llamada 1 vez (sin cambio) o 5 veces (centro + 4 esquinas a un cuarto de
+      píxel de distancia, promediadas) según `uDiskSupersamples`. El desvío de
+      cada muestra usa una base tangente perpendicular al rayo central,
+      escalada por `uPixelAngularSize` (FOV vertical entre la altura del
+      render en píxeles de dispositivo, calculada una vez por frame, no por
+      rayo). La base tangente usa un vector de referencia que cambia según
+      `rd0.y` en vez de un `WORLD_UP` fijo — con cámara mirando derecho hacia
+      abajo (una vista cenital real de esta app, no un caso raro) el producto
+      cruz con un `WORLD_UP` fijo se anula para toda una franja de píxeles de
+      pantalla, no sólo uno.
+    - Verificado en vitest (`renderQuality.test.ts`: "Baja"/"Media" en 1,
+      "Alta" mayor a 1), build y lint limpios, y en el navegador (calidad
+      "Alta" renderiza sin errores de consola en varios ángulos, incluida una
+      vista casi cenital, sin regresión visual respecto a "Media"). No se
+      logró reproducir en esta sesión, píxel a píxel, el ángulo exacto de
+      cámara del screenshot original del usuario — la confirmación visual
+      definitiva de la imagen secundaria suavizándose queda pendiente de que
+      el usuario la vea en su propio ángulo tras el deploy.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
@@ -795,9 +843,10 @@ la causa original (`POLE_GUARD`/la coordenada singular del polo θ en el integra
 Carter) ya no existe en absoluto en el código que renderiza — Modo Visual traza con el
 integrador 2D de Schwarzschild, que no tiene coordenada θ ni concepto de polo. Es una
 garantía estructural (el camino de código se eliminó, no se parchó) y no algo que haga
-falta re-verificar caso por caso. El ítem 11 documenta un artefacto visualmente similar
-pero de causa completamente distinta (un desajuste de radios entre el disco y la esfera
-de fotones), ya resuelto.
+falta re-verificar caso por caso. Los ítems 12 y 13 documentan artefactos visualmente
+similares pero de causas completamente distintas (un desajuste de radios entre el disco
+y la esfera de fotones; aliasing de muestreo único cerca de imágenes lensadas de orden
+superior), ya resueltos.
 
 ## Deploy
 

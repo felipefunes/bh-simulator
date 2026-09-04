@@ -5,6 +5,20 @@ export interface IntegratorQuality {
   schwSteps: number
   /** φ step size for the Schwarzschild tracer. */
   schwDPhi: number
+  /**
+   * Total rays traced per pixel for the disk hit/miss decision (1 = no
+   * supersampling, the original single-ray behavior). Only the disk boundary
+   * needs this: near the shadow, a higher-order lensed image of the disk can
+   * get compressed into a couple of screen pixels, so neighboring pixels jump
+   * straight from "hits the disk" to "misses entirely" with no way to land
+   * in between — not a fade-width bug (see LensedBackground.tsx's
+   * outerEdgeFadeGLSL, which already handles the ordinary outer-edge case
+   * fine), but plain aliasing from sampling that transition once per pixel.
+   * Jittering a few extra rays within the pixel and averaging resolves it,
+   * at roughly `diskSupersamples`× the shader's cost — reserved for "high"
+   * so the default render is unaffected.
+   */
+  diskSupersamples: number
 }
 
 // This module used to also carry KERR_STEPS/KERR_D_TAU, a *fixed* (not
@@ -31,14 +45,17 @@ export const INTEGRATOR_QUALITY: Record<QualityLevel, IntegratorQuality> = {
   low: {
     schwSteps: 80,
     schwDPhi: SCHW_TOTAL_PHI / 80,
+    diskSupersamples: 1,
   },
   medium: {
     schwSteps: 220,
     schwDPhi: 0.03,
+    diskSupersamples: 1,
   },
   high: {
     schwSteps: 400,
     schwDPhi: SCHW_TOTAL_PHI / 400,
+    diskSupersamples: 5,
   },
 }
 

@@ -10,12 +10,19 @@ describe('INTEGRATOR_QUALITY', () => {
   })
 
   it('reproduces the original pre-quality-control constants at "medium"', () => {
-    expect(INTEGRATOR_QUALITY.medium).toEqual({ schwSteps: 220, schwDPhi: 0.03 })
+    expect(INTEGRATOR_QUALITY.medium.schwSteps).toBe(220)
+    expect(INTEGRATOR_QUALITY.medium.schwDPhi).toBe(0.03)
   })
 
   it('takes fewer Schwarzschild steps at "low" and more at "high" than "medium"', () => {
     expect(INTEGRATOR_QUALITY.low.schwSteps).toBeLessThan(INTEGRATOR_QUALITY.medium.schwSteps)
     expect(INTEGRATOR_QUALITY.high.schwSteps).toBeGreaterThan(INTEGRATOR_QUALITY.medium.schwSteps)
+  })
+
+  it('only supersamples the disk edge at "high" — "low"/"medium" stay at the original single-ray cost', () => {
+    expect(INTEGRATOR_QUALITY.low.diskSupersamples).toBe(1)
+    expect(INTEGRATOR_QUALITY.medium.diskSupersamples).toBe(1)
+    expect(INTEGRATOR_QUALITY.high.diskSupersamples).toBeGreaterThan(1)
   })
 })
 
