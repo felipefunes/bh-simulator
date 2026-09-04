@@ -151,23 +151,38 @@ const VERTEX_SHADER = /* glsl */ `
 `
 
 // One ray tracer (mirrors physics/lensing.ts's traceSchwarzschildRay — the
-// ray stays in a fixed 2D plane, integrated in φ), used for every ray
-// regardless of spin. Frame dragging isn't actually integrated: instead, per
-// physics/visualSpinLensing.ts's effectiveMassForRay, each ray's *mass* for
-// the bending integration alone is nudged up or down based on how aligned
-// its orbital plane is with the spin axis — calibrated so a fully-equatorial
-// ray reproduces the exact real Kerr critical impact parameter for that
-// spin and rotational sense, and a polar ray gets zero bias (frame dragging
-// genuinely vanishes on the axis). This is "Modo Visual" from the roadmap:
-// it reproduces the one visual signature of spin people actually recognize
-// — the shadow's asymmetric flattening — without ever running the full
-// Carter-constant Kerr–Newman integrator that used to live here (still
-// intact, exact, and tested at physics/kerrLensing.ts — just not what
-// renders the picture anymore, since its per-pixel cost was the real
-// ceiling on performance at high spin). Charge is ignored for bending
-// (visually negligible either way, per the roadmap's own reasoning) — it
-// still affects the shadow/disk *sizes* correctly, via the exact metric
-// formulas that already feed uHorizonRadius/uDiskInnerRadius/uDiskOuterRadius.
+// ray stays in a fixed 2D plane, integrated in φ), always at the *true* mass,
+// used for every ray regardless of spin — bending/photon-ring behavior is
+// byte-for-byte identical to the spin=0 case, for every pixel. This is "Modo
+// Visual" from the roadmap: it reproduces the one visual signature of spin
+// people actually recognize — the shadow's asymmetric flattening — without
+// ever running the full Carter-constant Kerr–Newman integrator that used to
+// live here (still intact, exact, and tested at physics/kerrLensing.ts —
+// just not what renders the picture anymore, since its per-pixel cost was
+// the real ceiling on performance at high spin).
+//
+// Spin only enters as a post-hoc override on the final capture/escape
+// *decision* (retrogradeCriticalImpactParameterGLSL, applied in main()) —
+// see physics/visualSpinLensing.ts's file-level comment for why: a first
+// version varied each ray's *mass* continuously instead (calibrated so an
+// equatorial ray reproduced the exact real critical impact parameter in
+// both directions), which reintroduced exactly the kind of instability Modo
+// Visual was meant to avoid — null geodesics winding near the photon sphere
+// are extremely sensitive to mass, so even a smooth per-pixel mass
+// variation aliased into dashed/unstable concentric arcs at high spin
+// (reported by the user, confirmed absent at spin=0, and confirmed
+// insensitive to smoothing or damping the bias — the instability comes from
+// varying mass at all, not its strength). The override only *grows* the
+// shadow (retrograde side; escaping rays reclassified as captured, no fake
+// trajectory needed) — the shadow never shrinks on the prograde side, since
+// that would need a plausible escape trajectory for a ray that's genuinely
+// captured under the true mass, which has no principled answer. Accepted
+// trade-off, confirmed with the user.
+//
+// Charge is ignored for bending (visually negligible either way, per the
+// roadmap's own reasoning) — it still affects the shadow/disk *sizes*
+// correctly, via the exact metric formulas that already feed
+// uHorizonRadius/uDiskInnerRadius/uDiskOuterRadius.
 const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uCameraPos;
   uniform sampler2D uBackgroundTexture;
@@ -203,6 +218,24 @@ const FRAGMENT_SHADER = /* glsl */ `
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
   uniform sampler2D uDiskFlowTexture;
+  // Anti-aliasing for the disk hit/miss decision — see main()'s use of these.
+  // A higher-order lensed image of the disk can get compressed into a
+  // couple of screen pixels near the shadow, so neighboring pixels there can
+  // jump straight from "hits the disk" to "misses entirely" with nothing in
+  // between: not a fade-width bug (outerEdgeFadeGLSL already handles the
+  // ordinary outer edge, which fades against background fine), just aliasing
+  // from sampling that transition once per pixel — reported by the user as a
+  // hard black edge specifically where it borders *other* disk material,
+  // unlike the outer edge (which borders empty, already-dark space, so the
+  // same aliasing there is invisible). uPixelAngularSize is one screen
+  // pixel's angular size (vertical FOV / render height in device pixels —
+  // computed once per frame in LensedBackground.tsx, not per-ray); jittering
+  // a few extra rays within the pixel and averaging resolves it.
+  // uDiskSupersamples (from renderQuality.ts) is 1 (no-op, the original
+  // single-ray behavior) except at "high" quality, where the extra cost is
+  // acceptable.
+  uniform float uPixelAngularSize;
+  uniform int uDiskSupersamples;
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
@@ -478,8 +511,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     return normalize(e1Comp * e1 + e2Comp * e2);
   }
 
-  vec3 schwarzschildColor(vec3 ro, vec3 rd, float mass, out bool captured) {
-    bool diskHit;
+  vec3 schwarzschildColor(vec3 ro, vec3 rd, float mass, out bool captured, out bool diskHit) {
     vec3 diskPosition;
     float diskRadius;
     float diskFade;
@@ -515,36 +547,77 @@ const FRAGMENT_SHADER = /* glsl */ `
     return (rph * rph + spin * spin - p) / spin;
   }
 
-  // Effective mass for this ray's bending integration alone — mirrors
-  // physics/visualSpinLensing.ts's effectiveMassForRay exactly (see that
-  // module's doc comment for the full calibration rationale: exact at the
-  // pole, exact at the equator, linearly interpolated in |sinAngle| between
-  // them). sinAngle = 0 collapses the (equatorialMass - mass) term to zero
-  // via the final multiply, so no separate branch is needed for the polar
-  // case the way the TS version has (that one exists for clean, exact-value
-  // test assertions, not because the math needs it here).
-  float effectiveMassForRayGLSL(float mass, float spin, float sinAngle) {
-    if (spin <= 0.0) return mass;
-    float directionSign = sinAngle > 0.0 ? -1.0 : 1.0;
-    float bCritReal = abs(criticalImpactParameterGLSL(mass, spin, directionSign));
-    float equatorialMass = (bCritReal / (3.0 * sqrt(3.0))) * mass;
-    return mass + (equatorialMass - mass) * abs(sinAngle);
+  // Critical impact parameter used to decide capture for a ray with this
+  // sinAngle — mirrors physics/visualSpinLensing.ts's
+  // retrogradeCriticalImpactParameter exactly (see that module's file-level
+  // comment for why only retrograde rays, sinAngle < 0, get a bias at all —
+  // varying mass itself, tried first, made null geodesics near the photon
+  // sphere aliased/unstable across neighboring pixels at high spin). Grows
+  // smoothly (sinAngle²) from the plain Schwarzschild value at the pole
+  // toward the real Kerr retrograde value at the equator; prograde/polar
+  // rays (sinAngle >= 0) always get the unbiased value back.
+  float retrogradeCriticalImpactParameterGLSL(float mass, float spin, float sinAngle) {
+    float schwarzschildCrit = 3.0 * sqrt(3.0) * mass;
+    if (spin <= 0.0 || sinAngle >= 0.0) return schwarzschildCrit;
+    float bCritRetrograde = abs(criticalImpactParameterGLSL(mass, spin, 1.0));
+    return schwarzschildCrit + (bCritRetrograde - schwarzschildCrit) * sinAngle * sinAngle;
+  }
+
+  // One full trace + shading pass for a single ray direction — everything
+  // main() used to do inline, extracted so it can be called several times
+  // per pixel for supersampling (see main()'s doc comment).
+  vec3 sampleColor(vec3 rd) {
+    bool captured = false;
+    bool diskHit = false;
+    vec3 color = schwarzschildColor(uCameraPos, rd, uMass, captured, diskHit);
+
+    // Retrograde-only shadow growth: an escaping ray (not already captured,
+    // not a disk hit — the disk already uses the real Kerr–Newman ISCO via
+    // physics/orbits.ts, unrelated to this) gets reclassified as captured
+    // when its impact parameter falls under the interpolated retrograde
+    // critical value. See retrogradeCriticalImpactParameterGLSL's doc
+    // comment for why this is a post-hoc override on the *decision* rather
+    // than a change to the (always true-mass) bending itself.
+    if (!captured && !diskHit) {
+      vec3 impactVec = cross(uCameraPos, rd);
+      float bLen = length(impactVec);
+      float sinAngle = bLen > 1e-9 ? dot(impactVec, SPIN_AXIS) / bLen : 0.0;
+      if (bLen < retrogradeCriticalImpactParameterGLSL(uMass, uSpin, sinAngle)) {
+        color = vec3(0.0);
+      }
+    }
+
+    return color;
   }
 
   void main() {
-    vec3 rd = normalize(vWorldPos - uCameraPos);
+    vec3 rd0 = normalize(vWorldPos - uCameraPos);
+    vec3 color = sampleColor(rd0);
 
-    // How "equatorial" this specific ray's orbital plane is relative to the
-    // spin axis — see effectiveMassForRayGLSL / the file-level comment above
-    // for what this drives (the shadow's asymmetric flattening, standing in
-    // for a real Kerr integration).
-    vec3 impactVec = cross(uCameraPos, rd);
-    float bLen = length(impactVec);
-    float sinAngle = bLen > 1e-9 ? dot(impactVec, SPIN_AXIS) / bLen : 0.0;
-    float effectiveMass = effectiveMassForRayGLSL(uMass, uSpin, sinAngle);
+    // Disk-edge supersampling (see uDiskSupersamples' doc comment above) —
+    // uDiskSupersamples > 1 only at "high" quality, so this is a no-op
+    // (skips straight to gl_FragColor below) everywhere else. Four extra
+    // rays, jittered a quarter-pixel off center along an arbitrary tangent
+    // basis, averaged in with the center sample. Reference vector picked per
+    // pixel (rather than a single fixed WORLD_UP) so the cross product below
+    // never degenerates — a top-down camera view makes rd0 parallel to
+    // WORLD_UP for a real, non-negligible band of on-screen pixels, not just
+    // a measure-zero set.
+    if (uDiskSupersamples > 1) {
+      vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+      vec3 tangentX = normalize(cross(upRef, rd0));
+      vec3 tangentY = cross(rd0, tangentX);
+      float jitter = 0.25 * uPixelAngularSize;
 
-    bool captured = false;
-    gl_FragColor = vec4(schwarzschildColor(uCameraPos, rd, effectiveMass, captured), 1.0);
+      vec3 sum = color;
+      sum += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
+      sum += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
+      sum += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
+      sum += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
+      color = sum / 5.0;
+    }
+
+    gl_FragColor = vec4(color, 1.0);
   }
 `
 
@@ -560,7 +633,7 @@ export function LensedBackground({
   /** Disk radii in the same units as mass/horizonRadius, or null to disable the disk entirely (the showDisk sidebar toggle). */
   disk: { innerRadius: number; outerRadius: number } | null
 }) {
-  const { camera } = useThree()
+  const { camera, gl } = useThree()
   const materialRef = useRef<THREE.ShaderMaterial>(null)
   const texture = useMemo(() => generateGalaxyBackgroundTexture(), [])
   const flowTexture = useMemo(() => generateDiskFlowTexture(), [])
@@ -586,6 +659,8 @@ export function LensedBackground({
       uDiskOuterFadeWidth: { value: disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
+      uPixelAngularSize: { value: 0 },
+      uDiskSupersamples: { value: INTEGRATOR_QUALITY[quality].diskSupersamples },
     }),
     [texture, flowTexture, params.mass, params.spin, horizonRadius, quality, disk],
   )
@@ -605,6 +680,13 @@ export function LensedBackground({
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
     material.uniforms.uDiskOuterFadeWidth.value = disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0
+    material.uniforms.uDiskSupersamples.value = preset.diskSupersamples
+    // Vertical FOV (degrees, PerspectiveCamera-only in this app) / render
+    // height in device pixels — see uPixelAngularSize's doc comment in the
+    // shader above. gl.domElement's height already includes the dpr scaling
+    // from the Canvas's dpr prop, unlike useThree's `size` (CSS pixels).
+    const fovRadians = THREE.MathUtils.degToRad((camera as THREE.PerspectiveCamera).fov)
+    material.uniforms.uPixelAngularSize.value = fovRadians / gl.domElement.height
   })
 
   return (

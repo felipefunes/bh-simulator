@@ -1,48 +1,46 @@
 import { describe, expect, it } from 'vitest'
 import { criticalImpactParameter } from './orbits'
-import { effectiveMassForRay, traceVisualSpinRay } from './visualSpinLensing'
+import { retrogradeCriticalImpactParameter, traceVisualSpinRay } from './visualSpinLensing'
 import type { Vec3 } from './vec3'
 
 const SCHW_CRIT = 3 * Math.sqrt(3)
 const spinAxis: Vec3 = [0, 1, 0]
 
-describe('effectiveMassForRay', () => {
-  it('returns the true mass at zero spin, for any sinAngle', () => {
-    expect(effectiveMassForRay(1, 0, 1)).toBe(1)
-    expect(effectiveMassForRay(1, 0, -1)).toBe(1)
-    expect(effectiveMassForRay(1, 0, 0.5)).toBe(1)
+describe('retrogradeCriticalImpactParameter', () => {
+  it('returns the plain Schwarzschild value at zero spin, for any sinAngle', () => {
+    expect(retrogradeCriticalImpactParameter(1, 0, -1)).toBeCloseTo(SCHW_CRIT)
+    expect(retrogradeCriticalImpactParameter(1, 0, 1)).toBeCloseTo(SCHW_CRIT)
+    expect(retrogradeCriticalImpactParameter(1, 0, -0.5)).toBeCloseTo(SCHW_CRIT)
   })
 
-  it('returns the true mass for a polar ray (sinAngle = 0), for any spin', () => {
-    expect(effectiveMassForRay(1, 0.9, 0)).toBe(1)
-    expect(effectiveMassForRay(1, 1, 0)).toBe(1)
+  it('returns the plain Schwarzschild value for prograde and polar rays (sinAngle >= 0), for any spin', () => {
+    expect(retrogradeCriticalImpactParameter(1, 0.9, 0)).toBeCloseTo(SCHW_CRIT)
+    expect(retrogradeCriticalImpactParameter(1, 0.9, 1)).toBeCloseTo(SCHW_CRIT)
+    expect(retrogradeCriticalImpactParameter(1, 1, 0.5)).toBeCloseTo(SCHW_CRIT)
   })
 
-  it('at sinAngle = 1 (fully equatorial, prograde), matches 3√3·mass = the real prograde critical impact parameter', () => {
+  it('at sinAngle = -1 (fully equatorial, retrograde), matches the real retrograde critical impact parameter exactly', () => {
     const mass = 1
     const spin = 0.9
-    const effMass = effectiveMassForRay(mass, spin, 1)
-    const bCritReal = Math.abs(criticalImpactParameter({ mass, spin, charge: 0 }, 'prograde')!)
-    expect(SCHW_CRIT * effMass).toBeCloseTo(bCritReal)
-    expect(effMass).toBeLessThan(mass) // prograde shrinks the effective shadow
-  })
-
-  it('at sinAngle = -1 (fully equatorial, retrograde), matches 3√3·mass = the real retrograde critical impact parameter', () => {
-    const mass = 1
-    const spin = 0.9
-    const effMass = effectiveMassForRay(mass, spin, -1)
     const bCritReal = Math.abs(criticalImpactParameter({ mass, spin, charge: 0 }, 'retrograde')!)
-    expect(SCHW_CRIT * effMass).toBeCloseTo(bCritReal)
-    expect(effMass).toBeGreaterThan(mass) // retrograde grows the effective shadow
+    expect(retrogradeCriticalImpactParameter(mass, spin, -1)).toBeCloseTo(bCritReal)
   })
 
-  it('interpolates linearly in |sinAngle| between the pole and the equator', () => {
+  it('only ever grows the threshold — never below the Schwarzschild value', () => {
     const mass = 1
     const spin = 0.9
-    const atPole = effectiveMassForRay(mass, spin, 0)
-    const atEquator = effectiveMassForRay(mass, spin, 1)
-    const atHalf = effectiveMassForRay(mass, spin, 0.5)
-    expect(atHalf).toBeCloseTo(atPole + (atEquator - atPole) * 0.5)
+    for (const sinAngle of [-1, -0.75, -0.5, -0.25]) {
+      expect(retrogradeCriticalImpactParameter(mass, spin, sinAngle)).toBeGreaterThanOrEqual(SCHW_CRIT * mass)
+    }
+  })
+
+  it('interpolates smoothly (sinAngle²) between the pole and the equator', () => {
+    const mass = 1
+    const spin = 0.9
+    const atPole = retrogradeCriticalImpactParameter(mass, spin, 0)
+    const atEquator = retrogradeCriticalImpactParameter(mass, spin, -1)
+    const atHalf = retrogradeCriticalImpactParameter(mass, spin, -0.5)
+    expect(atHalf).toBeCloseTo(atPole + (atEquator - atPole) * 0.25)
   })
 })
 
@@ -72,35 +70,64 @@ describe('traceVisualSpinRay', () => {
     }
   })
 
-  it('shows the shadow-flattening asymmetry: an equatorial ray is captured prograde but escapes retrograde at the same real-physics threshold', () => {
+  it('prograde rays are unbiased — same Schwarzschild capture boundary as spin=0, even at high spin', () => {
+    // Deliberate trade-off (see this module's file-level comment): only the
+    // retrograde side grows. A prograde ray between the real prograde
+    // critical value (which the first, reverted version of this module
+    // would have shrunk the shadow to) and the plain Schwarzschild value
+    // should now escape, not be captured — the shadow never shrinks here.
     const spin = 0.9
-    const bCritProgradeRaw = criticalImpactParameter({ mass, spin, charge: 0 }, 'prograde')!
-    const bCritRetrogradeRaw = criticalImpactParameter({ mass, spin, charge: 0 }, 'retrograde')!
+    const bCritProgradeRaw = Math.abs(criticalImpactParameter({ mass, spin, charge: 0 }, 'prograde')!)
     const r0 = 60
     const options = { maxSteps: 4000, dPhi: 0.005, maxRadius: 500 }
 
     // Negating (see criticalImpactParameter's sign convention doc comment)
     // to get the "b" input that puts this ray at sinAngle = +1 (prograde).
-    const progradeInside = equatorialRay(r0, -bCritProgradeRaw * 0.9)
-    const progradeOutside = equatorialRay(r0, -bCritProgradeRaw * 1.1)
-    const retrogradeInside = equatorialRay(r0, -bCritRetrogradeRaw * 0.9)
-    const retrogradeOutside = equatorialRay(r0, -bCritRetrogradeRaw * 1.1)
+    const betweenRealAndSchwarzschild = equatorialRay(r0, -(bCritProgradeRaw + SCHW_CRIT) / 2)
+    const wellInsideSchwarzschild = equatorialRay(r0, -SCHW_CRIT * 0.5)
+    const wellOutsideSchwarzschild = equatorialRay(r0, -SCHW_CRIT * 1.5)
 
     expect(
-      traceVisualSpinRay({ mass, spin, horizonRadius }, progradeInside.cameraPos, progradeInside.rayDir, spinAxis, options)
+      traceVisualSpinRay(
+        { mass, spin, horizonRadius },
+        betweenRealAndSchwarzschild.cameraPos,
+        betweenRealAndSchwarzschild.rayDir,
+        spinAxis,
+        options,
+      ).captured,
+    ).toBe(true) // still inside the (unbiased) Schwarzschild threshold
+    expect(
+      traceVisualSpinRay({ mass, spin, horizonRadius }, wellInsideSchwarzschild.cameraPos, wellInsideSchwarzschild.rayDir, spinAxis, options)
         .captured,
     ).toBe(true)
     expect(
-      traceVisualSpinRay({ mass, spin, horizonRadius }, progradeOutside.cameraPos, progradeOutside.rayDir, spinAxis, options)
+      traceVisualSpinRay({ mass, spin, horizonRadius }, wellOutsideSchwarzschild.cameraPos, wellOutsideSchwarzschild.rayDir, spinAxis, options)
         .captured,
     ).toBe(false)
+  })
+
+  it('retrograde rays show the (one-sided) shadow growth: captured between the Schwarzschild and real retrograde thresholds', () => {
+    const spin = 0.9
+    const bCritRetrogradeRaw = Math.abs(criticalImpactParameter({ mass, spin, charge: 0 }, 'retrograde')!)
+    const r0 = 60
+    const options = { maxSteps: 4000, dPhi: 0.005, maxRadius: 500 }
+
+    // Positive b (unnegated) puts the ray at sinAngle = -1 (retrograde) —
+    // see criticalImpactParameter's sign convention doc comment.
+    const betweenSchwarzschildAndReal = equatorialRay(r0, (SCHW_CRIT + bCritRetrogradeRaw) / 2)
+    const wellOutsideReal = equatorialRay(r0, bCritRetrogradeRaw * 1.2)
+
     expect(
-      traceVisualSpinRay({ mass, spin, horizonRadius }, retrogradeInside.cameraPos, retrogradeInside.rayDir, spinAxis, options)
-        .captured,
-    ).toBe(true)
+      traceVisualSpinRay(
+        { mass, spin, horizonRadius },
+        betweenSchwarzschildAndReal.cameraPos,
+        betweenSchwarzschildAndReal.rayDir,
+        spinAxis,
+        options,
+      ).captured,
+    ).toBe(true) // grown shadow catches this one, unlike plain Schwarzschild
     expect(
-      traceVisualSpinRay({ mass, spin, horizonRadius }, retrogradeOutside.cameraPos, retrogradeOutside.rayDir, spinAxis, options)
-        .captured,
+      traceVisualSpinRay({ mass, spin, horizonRadius }, wellOutsideReal.cameraPos, wellOutsideReal.rayDir, spinAxis, options).captured,
     ).toBe(false)
   })
 
