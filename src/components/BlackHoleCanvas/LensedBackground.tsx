@@ -218,6 +218,24 @@ const FRAGMENT_SHADER = /* glsl */ `
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
   uniform sampler2D uDiskFlowTexture;
+  // Anti-aliasing for the disk hit/miss decision — see main()'s use of these.
+  // A higher-order lensed image of the disk can get compressed into a
+  // couple of screen pixels near the shadow, so neighboring pixels there can
+  // jump straight from "hits the disk" to "misses entirely" with nothing in
+  // between: not a fade-width bug (outerEdgeFadeGLSL already handles the
+  // ordinary outer edge, which fades against background fine), just aliasing
+  // from sampling that transition once per pixel — reported by the user as a
+  // hard black edge specifically where it borders *other* disk material,
+  // unlike the outer edge (which borders empty, already-dark space, so the
+  // same aliasing there is invisible). uPixelAngularSize is one screen
+  // pixel's angular size (vertical FOV / render height in device pixels —
+  // computed once per frame in LensedBackground.tsx, not per-ray); jittering
+  // a few extra rays within the pixel and averaging resolves it.
+  // uDiskSupersamples (from renderQuality.ts) is 1 (no-op, the original
+  // single-ray behavior) except at "high" quality, where the extra cost is
+  // acceptable.
+  uniform float uPixelAngularSize;
+  uniform int uDiskSupersamples;
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
@@ -545,9 +563,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     return schwarzschildCrit + (bCritRetrograde - schwarzschildCrit) * sinAngle * sinAngle;
   }
 
-  void main() {
-    vec3 rd = normalize(vWorldPos - uCameraPos);
-
+  // One full trace + shading pass for a single ray direction — everything
+  // main() used to do inline, extracted so it can be called several times
+  // per pixel for supersampling (see main()'s doc comment).
+  vec3 sampleColor(vec3 rd) {
     bool captured = false;
     bool diskHit = false;
     vec3 color = schwarzschildColor(uCameraPos, rd, uMass, captured, diskHit);
@@ -568,6 +587,36 @@ const FRAGMENT_SHADER = /* glsl */ `
       }
     }
 
+    return color;
+  }
+
+  void main() {
+    vec3 rd0 = normalize(vWorldPos - uCameraPos);
+    vec3 color = sampleColor(rd0);
+
+    // Disk-edge supersampling (see uDiskSupersamples' doc comment above) —
+    // uDiskSupersamples > 1 only at "high" quality, so this is a no-op
+    // (skips straight to gl_FragColor below) everywhere else. Four extra
+    // rays, jittered a quarter-pixel off center along an arbitrary tangent
+    // basis, averaged in with the center sample. Reference vector picked per
+    // pixel (rather than a single fixed WORLD_UP) so the cross product below
+    // never degenerates — a top-down camera view makes rd0 parallel to
+    // WORLD_UP for a real, non-negligible band of on-screen pixels, not just
+    // a measure-zero set.
+    if (uDiskSupersamples > 1) {
+      vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+      vec3 tangentX = normalize(cross(upRef, rd0));
+      vec3 tangentY = cross(rd0, tangentX);
+      float jitter = 0.25 * uPixelAngularSize;
+
+      vec3 sum = color;
+      sum += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
+      sum += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
+      sum += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
+      sum += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
+      color = sum / 5.0;
+    }
+
     gl_FragColor = vec4(color, 1.0);
   }
 `
@@ -584,7 +633,7 @@ export function LensedBackground({
   /** Disk radii in the same units as mass/horizonRadius, or null to disable the disk entirely (the showDisk sidebar toggle). */
   disk: { innerRadius: number; outerRadius: number } | null
 }) {
-  const { camera } = useThree()
+  const { camera, gl } = useThree()
   const materialRef = useRef<THREE.ShaderMaterial>(null)
   const texture = useMemo(() => generateGalaxyBackgroundTexture(), [])
   const flowTexture = useMemo(() => generateDiskFlowTexture(), [])
@@ -610,6 +659,8 @@ export function LensedBackground({
       uDiskOuterFadeWidth: { value: disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0 },
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
+      uPixelAngularSize: { value: 0 },
+      uDiskSupersamples: { value: INTEGRATOR_QUALITY[quality].diskSupersamples },
     }),
     [texture, flowTexture, params.mass, params.spin, horizonRadius, quality, disk],
   )
@@ -629,6 +680,13 @@ export function LensedBackground({
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
     material.uniforms.uDiskOuterFadeWidth.value = disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0
+    material.uniforms.uDiskSupersamples.value = preset.diskSupersamples
+    // Vertical FOV (degrees, PerspectiveCamera-only in this app) / render
+    // height in device pixels — see uPixelAngularSize's doc comment in the
+    // shader above. gl.domElement's height already includes the dpr scaling
+    // from the Canvas's dpr prop, unlike useThree's `size` (CSS pixels).
+    const fovRadians = THREE.MathUtils.degToRad((camera as THREE.PerspectiveCamera).fov)
+    material.uniforms.uPixelAngularSize.value = fovRadians / gl.domElement.height
   })
 
   return (
