@@ -232,10 +232,12 @@ const FRAGMENT_SHADER = /* glsl */ `
   // one screen pixel's angular size (vertical FOV / render height in device
   // pixels — computed once per frame in LensedBackground.tsx, not per-ray);
   // jittering a few extra rays within the pixel and averaging resolves it.
-  // Applied at every quality level (see renderQuality.ts's DISK_SUPERSAMPLES
-  // doc comment for why this isn't quality-gated like uSchwSteps) — verified
-  // by isolating it from schwSteps/dPhi: even at "low"'s coarsest integrator,
-  // supersampling alone removed the artifact.
+  // Isolating it from schwSteps/dPhi confirmed it's needed at every quality
+  // level (even "low"'s coarsest integrator) — but paying for it on every
+  // pixel, everywhere, was rejected on performance grounds (see
+  // renderQuality.ts's DISK_SUPERSAMPLES doc comment). main() now gates it to
+  // only the pixels near the critical impact parameter, where this kind of
+  // image compression actually happens.
   uniform float uPixelAngularSize;
   varying vec3 vWorldPos;
 
@@ -247,6 +249,13 @@ const FRAGMENT_SHADER = /* glsl */ `
   // edge — matches AccretionDisk.tsx's old VISUAL_TIME_SCALE, kept for the
   // same reason (legibility), not physical accuracy.
   const float VISUAL_TIME_SCALE = 15.0;
+  // How close (as a fraction of the critical impact parameter) a ray needs
+  // to pass to the shadow before main() pays for disk-edge supersampling —
+  // see main()'s doc comment. Not derived from anything physical; picked
+  // generously and confirmed in-browser to still cover the artifact at
+  // steep below-the-disk-plane angles, tightened only as far as visual
+  // testing allowed without the artifact creeping back in.
+  const float DISK_SUPERSAMPLE_IMPACT_MARGIN_RATIO = 0.35;
 
   // Mirrors src/physics/accretionDisk.ts exactly (Shakura & Sunyaev 1973
   // profile) — see that module for the derivation and vitest coverage.
@@ -593,27 +602,42 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   void main() {
     vec3 rd0 = normalize(vWorldPos - uCameraPos);
+    vec3 color = sampleColor(rd0);
 
     // Disk-edge supersampling (see uPixelAngularSize's doc comment above) —
-    // applied unconditionally, at every quality level (this fixes a real
-    // aliasing bug, not a fidelity knob — see renderQuality.ts's
-    // DISK_SUPERSAMPLES). Four extra rays, jittered a quarter-pixel off
-    // center along an arbitrary tangent basis, averaged in with the center
-    // sample. Reference vector picked per pixel (rather than a single fixed
-    // WORLD_UP) so the cross product below never degenerates — a top-down
-    // camera view makes rd0 parallel to WORLD_UP for a real, non-negligible
-    // band of on-screen pixels, not just a measure-zero set.
-    vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 tangentX = normalize(cross(upRef, rd0));
-    vec3 tangentY = cross(rd0, tangentX);
-    float jitter = 0.25 * uPixelAngularSize;
+    // gated to only the pixels that actually need it. A first version ran
+    // this unconditionally on every pixel at every quality level and was
+    // rejected on performance grounds (~5x the shader's cost, everywhere,
+    // even over plain background or the wide, uncompressed part of the
+    // disk that was never at risk). The aliasing this fixes only happens
+    // where a ray's impact parameter is close to the critical value — that's
+    // exactly the strong-lensing region where multiple/higher-order images
+    // compress together — so gating on proximity to that value targets the
+    // thin ring of pixels around the shadow where it actually occurs,
+    // leaving the rest of the frame at the original single-ray cost.
+    vec3 impactVec = cross(uCameraPos, rd0);
+    float bLen = length(impactVec);
+    float sinAngle = bLen > 1e-9 ? dot(impactVec, SPIN_AXIS) / bLen : 0.0;
+    float criticalB = retrogradeCriticalImpactParameterGLSL(uMass, uSpin, sinAngle);
 
-    vec3 color = sampleColor(rd0);
-    color += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
-    color += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
-    color += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
-    color += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
-    color /= 5.0;
+    if (abs(bLen - criticalB) < DISK_SUPERSAMPLE_IMPACT_MARGIN_RATIO * criticalB) {
+      // Four extra rays, jittered a quarter-pixel off center along an
+      // arbitrary tangent basis, averaged in with the center sample.
+      // Reference vector picked per pixel (rather than a single fixed
+      // WORLD_UP) so the cross product below never degenerates — a top-down
+      // camera view makes rd0 parallel to WORLD_UP for a real,
+      // non-negligible band of on-screen pixels, not just a measure-zero set.
+      vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+      vec3 tangentX = normalize(cross(upRef, rd0));
+      vec3 tangentY = cross(rd0, tangentX);
+      float jitter = 0.25 * uPixelAngularSize;
+
+      color += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
+      color += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
+      color += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
+      color += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
+      color /= 5.0;
+    }
 
     gl_FragColor = vec4(color, 1.0);
   }

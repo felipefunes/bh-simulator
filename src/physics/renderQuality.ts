@@ -31,6 +31,14 @@ export interface IntegratorQuality {
 // Kerr precedent: reducing it isn't a softer-but-cheaper option, it's a
 // correctness bug, and "quality" only governs schwSteps/schwDPhi and pixel
 // ratio (pixelRatioForQuality below) — the axes safe to reduce.
+//
+// A first version paid this 5x cost on *every* pixel at every quality level —
+// rejected (before merge) for tanking performance at "medium", since it ran
+// full-cost even over plain background and the wide, uncompressed part of
+// the disk that was never at risk. LensedBackground.tsx's main() now gates
+// it to pixels near the critical impact parameter (the strong-lensing region
+// where this compression actually happens), so this constant is still always
+// 5 — it's paid by far fewer pixels, not a smaller multiplier.
 export const DISK_SUPERSAMPLES = 5
 
 // "medium" reproduces the original, pre-quality-control Schwarzschild

@@ -875,6 +875,36 @@ clasificación del caso) de forma aislada del render.
       aislamiento de variables arriba, que es la evidencia real del fix (más
       confiable que una comparación visual antes/después sujeta a variación
       de encuadre).
+    - **Rechazado por el usuario tras probarlo**: "el costo en performance
+      fue demasiado alto. En calidad media el navegador casi explota". El
+      diagnóstico de aislamiento de variables era correcto (el supersampling
+      sí arregla el bug, sin importar la precisión del integrador), pero la
+      conclusión de implementación no — pagar 5x en *todo* píxel de la
+      pantalla, en los tres niveles, es un costo real y notorio en un shader
+      que ya es el cuello de botella conocido de todo este proyecto (ver
+      ítems 6/7/8/9), no sólo un detalle de benchmark. Verificado sólo
+      "no hay errores de consola" antes de recomendar aplicarlo a todo
+      nivel, sin medir el costo real en cuadros por segundo — ese fue el
+      hueco en la verificación.
+      - **Fix real**: en vez de pagar el costo en cada píxel, `main()` ahora
+        lo paga sólo en los píxeles cuyo parámetro de impacto cae cerca del
+        valor crítico (`DISK_SUPERSAMPLE_IMPACT_MARGIN_RATIO = 0.35` del
+        valor crítico) — que es, por construcción, exactamente la región de
+        lente fuerte donde las imágenes de orden superior se comprimen
+        (ninguna imagen múltiple existe lejos de la esfera de fotones), así
+        que no es una heurística aproximada sino el criterio geométrico
+        correcto para dónde puede ocurrir este aliasing en absoluto. El
+        resto de la pantalla (fondo, la mayor parte del disco) vuelve al
+        costo de un solo rayo por píxel, igual que antes del ítem 13.
+      - Verificado visualmente coloreando temporalmente de rojo la región
+        con supersampling activo (mismo patrón de diagnóstico que en PRs
+        anteriores — colorear qué camino de código atiende cada píxel): un
+        anillo delgado alrededor de la sombra, ni remotamente toda la
+        pantalla, confirmando que el costo real quedó acotado a esa región
+        antes de revertir el color de diagnóstico.
+      - `DISK_SUPERSAMPLES` en `renderQuality.ts` sigue siendo 5 (el
+        multiplicador de costo dentro de esa región no cambió) — lo que
+        cambió es cuántos píxeles pagan ese multiplicador.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
