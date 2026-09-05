@@ -218,24 +218,25 @@ const FRAGMENT_SHADER = /* glsl */ `
   // disk's rotating "flow" look — see diskColor's use of these below.
   uniform float uTime;
   uniform sampler2D uDiskFlowTexture;
-  // Anti-aliasing for the disk hit/miss decision — see main()'s use of these.
+  // Anti-aliasing for the disk hit/miss decision — see main()'s use of this.
   // A higher-order lensed image of the disk can get compressed into a
   // couple of screen pixels near the shadow, so neighboring pixels there can
   // jump straight from "hits the disk" to "misses entirely" with nothing in
   // between: not a fade-width bug (outerEdgeFadeGLSL already handles the
   // ordinary outer edge, which fades against background fine), just aliasing
-  // from sampling that transition once per pixel — reported by the user as a
-  // hard black edge specifically where it borders *other* disk material,
-  // unlike the outer edge (which borders empty, already-dark space, so the
-  // same aliasing there is invisible). uPixelAngularSize is one screen
-  // pixel's angular size (vertical FOV / render height in device pixels —
-  // computed once per frame in LensedBackground.tsx, not per-ray); jittering
-  // a few extra rays within the pixel and averaging resolves it.
-  // uDiskSupersamples (from renderQuality.ts) is 1 (no-op, the original
-  // single-ray behavior) except at "high" quality, where the extra cost is
-  // acceptable.
+  // from sampling that transition once per pixel — reported by the user first
+  // as a hard black edge bordering *other* disk material (unlike the outer
+  // edge, which borders empty, already-dark space, so the same aliasing there
+  // is invisible), and again from a below-the-plane camera angle where the
+  // disk's edge grazes a higher-order image of itself. uPixelAngularSize is
+  // one screen pixel's angular size (vertical FOV / render height in device
+  // pixels — computed once per frame in LensedBackground.tsx, not per-ray);
+  // jittering a few extra rays within the pixel and averaging resolves it.
+  // Applied at every quality level (see renderQuality.ts's DISK_SUPERSAMPLES
+  // doc comment for why this isn't quality-gated like uSchwSteps) — verified
+  // by isolating it from schwSteps/dPhi: even at "low"'s coarsest integrator,
+  // supersampling alone removed the artifact.
   uniform float uPixelAngularSize;
-  uniform int uDiskSupersamples;
   varying vec3 vWorldPos;
 
   const int MAX_STEPS_SCHW_CAP = 400;
@@ -592,30 +593,27 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   void main() {
     vec3 rd0 = normalize(vWorldPos - uCameraPos);
+
+    // Disk-edge supersampling (see uPixelAngularSize's doc comment above) —
+    // applied unconditionally, at every quality level (this fixes a real
+    // aliasing bug, not a fidelity knob — see renderQuality.ts's
+    // DISK_SUPERSAMPLES). Four extra rays, jittered a quarter-pixel off
+    // center along an arbitrary tangent basis, averaged in with the center
+    // sample. Reference vector picked per pixel (rather than a single fixed
+    // WORLD_UP) so the cross product below never degenerates — a top-down
+    // camera view makes rd0 parallel to WORLD_UP for a real, non-negligible
+    // band of on-screen pixels, not just a measure-zero set.
+    vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangentX = normalize(cross(upRef, rd0));
+    vec3 tangentY = cross(rd0, tangentX);
+    float jitter = 0.25 * uPixelAngularSize;
+
     vec3 color = sampleColor(rd0);
-
-    // Disk-edge supersampling (see uDiskSupersamples' doc comment above) —
-    // uDiskSupersamples > 1 only at "high" quality, so this is a no-op
-    // (skips straight to gl_FragColor below) everywhere else. Four extra
-    // rays, jittered a quarter-pixel off center along an arbitrary tangent
-    // basis, averaged in with the center sample. Reference vector picked per
-    // pixel (rather than a single fixed WORLD_UP) so the cross product below
-    // never degenerates — a top-down camera view makes rd0 parallel to
-    // WORLD_UP for a real, non-negligible band of on-screen pixels, not just
-    // a measure-zero set.
-    if (uDiskSupersamples > 1) {
-      vec3 upRef = abs(rd0.y) > 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-      vec3 tangentX = normalize(cross(upRef, rd0));
-      vec3 tangentY = cross(rd0, tangentX);
-      float jitter = 0.25 * uPixelAngularSize;
-
-      vec3 sum = color;
-      sum += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
-      sum += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
-      sum += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
-      sum += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
-      color = sum / 5.0;
-    }
+    color += sampleColor(normalize(rd0 - tangentX * jitter - tangentY * jitter));
+    color += sampleColor(normalize(rd0 + tangentX * jitter - tangentY * jitter));
+    color += sampleColor(normalize(rd0 - tangentX * jitter + tangentY * jitter));
+    color += sampleColor(normalize(rd0 + tangentX * jitter + tangentY * jitter));
+    color /= 5.0;
 
     gl_FragColor = vec4(color, 1.0);
   }
@@ -660,7 +658,6 @@ export function LensedBackground({
       uTime: { value: 0 },
       uDiskFlowTexture: { value: flowTexture },
       uPixelAngularSize: { value: 0 },
-      uDiskSupersamples: { value: INTEGRATOR_QUALITY[quality].diskSupersamples },
     }),
     [texture, flowTexture, params.mass, params.spin, horizonRadius, quality, disk],
   )
@@ -680,7 +677,6 @@ export function LensedBackground({
     material.uniforms.uDiskInnerRadius.value = disk?.innerRadius ?? 0
     material.uniforms.uDiskOuterRadius.value = disk?.outerRadius ?? 0
     material.uniforms.uDiskOuterFadeWidth.value = disk ? disk.outerRadius * DISK_OUTER_FADE_RATIO : 0
-    material.uniforms.uDiskSupersamples.value = preset.diskSupersamples
     // Vertical FOV (degrees, PerspectiveCamera-only in this app) / render
     // height in device pixels — see uPixelAngularSize's doc comment in the
     // shader above. gl.domElement's height already includes the dpr scaling

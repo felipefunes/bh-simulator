@@ -5,20 +5,6 @@ export interface IntegratorQuality {
   schwSteps: number
   /** φ step size for the Schwarzschild tracer. */
   schwDPhi: number
-  /**
-   * Total rays traced per pixel for the disk hit/miss decision (1 = no
-   * supersampling, the original single-ray behavior). Only the disk boundary
-   * needs this: near the shadow, a higher-order lensed image of the disk can
-   * get compressed into a couple of screen pixels, so neighboring pixels jump
-   * straight from "hits the disk" to "misses entirely" with no way to land
-   * in between — not a fade-width bug (see LensedBackground.tsx's
-   * outerEdgeFadeGLSL, which already handles the ordinary outer-edge case
-   * fine), but plain aliasing from sampling that transition once per pixel.
-   * Jittering a few extra rays within the pixel and averaging resolves it,
-   * at roughly `diskSupersamples`× the shader's cost — reserved for "high"
-   * so the default render is unaffected.
-   */
-  diskSupersamples: number
 }
 
 // This module used to also carry KERR_STEPS/KERR_D_TAU, a *fixed* (not
@@ -30,6 +16,22 @@ export interface IntegratorQuality {
 // tracer below (with a per-ray effective-mass bias standing in for real
 // frame dragging), so this quality selector applies uniformly regardless of
 // spin — a spinning hole is no longer a special, more expensive case.
+
+// DISK_SUPERSAMPLES follows that same "fixed regardless of quality" pattern,
+// for the same reason KERR_STEPS did: it was first added (see git history)
+// gated to "high" only, as a genuine quality/performance trade-off — but a
+// user report reproduced the exact aliasing it fixes (a dashed/cross-hatched
+// patch right where the disk's edge grazes a higher-order lensed image of
+// itself) at "low" and "medium" too, from a below-the-plane camera angle.
+// Isolated by testing DISK_SUPERSAMPLES=5 at "medium"'s cheaper schwSteps,
+// and separately at "low"'s (the coarsest integrator), with no other change:
+// the artifact disappeared completely both times, regardless of integrator
+// precision — proving this is purely single-ray aliasing, not an
+// under-resolved-integration issue like the Kerr one above. So, matching the
+// Kerr precedent: reducing it isn't a softer-but-cheaper option, it's a
+// correctness bug, and "quality" only governs schwSteps/schwDPhi and pixel
+// ratio (pixelRatioForQuality below) — the axes safe to reduce.
+export const DISK_SUPERSAMPLES = 5
 
 // "medium" reproduces the original, pre-quality-control Schwarzschild
 // constants (see git history of LensedBackground.tsx) exactly, so existing
@@ -45,17 +47,14 @@ export const INTEGRATOR_QUALITY: Record<QualityLevel, IntegratorQuality> = {
   low: {
     schwSteps: 80,
     schwDPhi: SCHW_TOTAL_PHI / 80,
-    diskSupersamples: 1,
   },
   medium: {
     schwSteps: 220,
     schwDPhi: 0.03,
-    diskSupersamples: 1,
   },
   high: {
     schwSteps: 400,
     schwDPhi: SCHW_TOTAL_PHI / 400,
-    diskSupersamples: 5,
   },
 }
 
