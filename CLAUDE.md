@@ -831,6 +831,81 @@ clasificación del caso) de forma aislada del render.
       definitiva de la imagen secundaria suavizándose queda pendiente de que
       el usuario la vea en su propio ángulo tras el deploy.
 
+14. ✅ **`DISK_SUPERSAMPLES` deja de ser exclusivo de "Alta"** (reportado por el
+    usuario con una captura: un parche cruzado/punteado justo donde el borde
+    del disco roza una imagen lensada de orden superior de sí mismo, mirando
+    desde abajo del plano del disco de forma que éste cruza por arriba de la
+    sombra — "esas circunferencias perimetrales negras... desaparecen con
+    calidad alta"). Es la misma clase de aliasing del ítem 13, no un bug
+    nuevo — pero el ítem 13 sólo lo corrige en calidad "Alta"
+    (`diskSupersamples: 5` ahí, `1` en "Baja"/"Media"), así que seguía
+    apareciendo en las otras dos.
+    - Diagnóstico por aislamiento, no por inspección de código: en vez de
+      asumir que "Alta" arregla esto por su mayor precisión de integrador
+      (`schwSteps`/`schwDPhi`) o su mayor pixel ratio, se probó cada palanca
+      por separado. Subir sólo `diskSupersamples` a 5 en "Media" — sin tocar
+      `schwSteps`/`schwDPhi`/pixel ratio de "Media" — eliminó el artefacto
+      por completo. Repetido en "Baja" (el integrador más grosero de todos,
+      80 pasos): mismo resultado limpio. Conclusión: el supersampling por sí
+      solo lo arregla, sin importar la precisión del integrador — confirma
+      que es aliasing de muestreo único (ítem 13), no una integración
+      sub-resuelta como la de Kerr (ítem 8/9).
+    - Dado que reducirlo no es un trade-off de nitidez sino un bug real
+      (ruido/glitch visible), se aplicó el mismo criterio que
+      `KERR_STEPS`/`KERR_D_TAU` en su momento (ítem 8): en vez de una opción
+      barata que a veces rompe la imagen, se sacó de `IntegratorQuality` y
+      pasó a ser una constante fija (`DISK_SUPERSAMPLES = 5` en
+      `renderQuality.ts`, ya no parte del registro por nivel). El selector de
+      calidad sigue controlando `schwSteps`/`schwDPhi` y el pixel ratio (las
+      palancas que sí es seguro reducir) — el costo del supersampling ahora
+      lo paga todo nivel por igual.
+    - `LensedBackground.tsx`: el uniform `uDiskSupersamples` y su `if` en
+      `main()` se eliminaron — el promedio de 5 muestras (centro + 4 esquinas
+      a un cuarto de píxel) corre siempre, sin condicional. Simplifica el
+      shader además de arreglar el bug.
+    - Verificado: 84/84 tests (el test de `renderQuality.test.ts` que
+      comprobaba "sólo en Alta" se reemplazó por uno que confirma que
+      `DISK_SUPERSAMPLES` no depende del nivel), build y lint limpios, sin
+      errores de consola en "Baja" tras el cambio. La reproducción exacta del
+      ángulo de cámara del usuario (justo debajo del plano del disco, con
+      zoom) costó bastante lograr en el navegador — los controles de órbita
+      quedan "pegados" en el polo exacto (cenital) si se arrastra sólo en esa
+      dirección, y hace falta arrastrar en la dirección opuesta para salir de
+      ahí — pero una vez reproducido, permitió confirmar el diagnóstico por
+      aislamiento de variables arriba, que es la evidencia real del fix (más
+      confiable que una comparación visual antes/después sujeta a variación
+      de encuadre).
+    - **Rechazado por el usuario tras probarlo**: "el costo en performance
+      fue demasiado alto. En calidad media el navegador casi explota". El
+      diagnóstico de aislamiento de variables era correcto (el supersampling
+      sí arregla el bug, sin importar la precisión del integrador), pero la
+      conclusión de implementación no — pagar 5x en *todo* píxel de la
+      pantalla, en los tres niveles, es un costo real y notorio en un shader
+      que ya es el cuello de botella conocido de todo este proyecto (ver
+      ítems 6/7/8/9), no sólo un detalle de benchmark. Verificado sólo
+      "no hay errores de consola" antes de recomendar aplicarlo a todo
+      nivel, sin medir el costo real en cuadros por segundo — ese fue el
+      hueco en la verificación.
+      - **Fix real**: en vez de pagar el costo en cada píxel, `main()` ahora
+        lo paga sólo en los píxeles cuyo parámetro de impacto cae cerca del
+        valor crítico (`DISK_SUPERSAMPLE_IMPACT_MARGIN_RATIO = 0.35` del
+        valor crítico) — que es, por construcción, exactamente la región de
+        lente fuerte donde las imágenes de orden superior se comprimen
+        (ninguna imagen múltiple existe lejos de la esfera de fotones), así
+        que no es una heurística aproximada sino el criterio geométrico
+        correcto para dónde puede ocurrir este aliasing en absoluto. El
+        resto de la pantalla (fondo, la mayor parte del disco) vuelve al
+        costo de un solo rayo por píxel, igual que antes del ítem 13.
+      - Verificado visualmente coloreando temporalmente de rojo la región
+        con supersampling activo (mismo patrón de diagnóstico que en PRs
+        anteriores — colorear qué camino de código atiende cada píxel): un
+        anillo delgado alrededor de la sombra, ni remotamente toda la
+        pantalla, confirmando que el costo real quedó acotado a esa región
+        antes de revertir el color de diagnóstico.
+      - `DISK_SUPERSAMPLES` en `renderQuality.ts` sigue siendo 5 (el
+        multiplicador de costo dentro de esa región no cambió) — lo que
+        cambió es cuántos píxeles pagan ese multiplicador.
+
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
 
