@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { INTEGRATOR_QUALITY, pixelRatioForQuality, type QualityLevel } from './renderQuality'
+import { DISK_SUPERSAMPLES, INTEGRATOR_QUALITY, pixelRatioForQuality, type QualityLevel } from './renderQuality'
 
 describe('INTEGRATOR_QUALITY', () => {
   it('keeps steps × stepSize (the total integrated range) constant across levels', () => {
@@ -19,10 +19,14 @@ describe('INTEGRATOR_QUALITY', () => {
     expect(INTEGRATOR_QUALITY.high.schwSteps).toBeGreaterThan(INTEGRATOR_QUALITY.medium.schwSteps)
   })
 
-  it('only supersamples the disk edge at "high" — "low"/"medium" stay at the original single-ray cost', () => {
-    expect(INTEGRATOR_QUALITY.low.diskSupersamples).toBe(1)
-    expect(INTEGRATOR_QUALITY.medium.diskSupersamples).toBe(1)
-    expect(INTEGRATOR_QUALITY.high.diskSupersamples).toBeGreaterThan(1)
+})
+
+describe('DISK_SUPERSAMPLES', () => {
+  it('supersamples the disk edge regardless of quality level — not gated like schwSteps', () => {
+    // Unlike schwSteps/schwDPhi, this isn't part of IntegratorQuality: it fixes
+    // a real aliasing bug (see renderQuality.ts's doc comment), not a
+    // fidelity/performance trade-off, so every quality level pays for it.
+    expect(DISK_SUPERSAMPLES).toBeGreaterThan(1)
   })
 })
 
