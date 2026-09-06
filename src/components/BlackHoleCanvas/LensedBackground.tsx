@@ -249,6 +249,14 @@ const FRAGMENT_SHADER = /* glsl */ `
   // edge — matches AccretionDisk.tsx's old VISUAL_TIME_SCALE, kept for the
   // same reason (legibility), not physical accuracy.
   const float VISUAL_TIME_SCALE = 15.0;
+  // Bounds how long the disk's flow noise (see diskColor's use of this) is
+  // allowed to shear before cross-fading to a freshly-reset copy — without
+  // this, differential rotation winds the pattern into full decorrelation
+  // within a few minutes at VISUAL_TIME_SCALE (see diskColor's doc comment).
+  // Picked as "long enough that the shearing itself reads as motion, short
+  // enough that it never visibly finishes decorrelating" — not derived from
+  // anything physical, same spirit as VISUAL_TIME_SCALE above.
+  const float FLOW_RESET_PERIOD = 48.0;
   // How close (as a fraction of the critical impact parameter) a ray needs
   // to pass to the shadow before main() pays for disk-edge supersampling —
   // see main()'s doc comment. Not derived from anything physical; picked
@@ -348,12 +356,46 @@ const FRAGMENT_SHADER = /* glsl */ `
     // the outer edge, same real differential rotation as physics/orbits.ts,
     // just VISUAL_TIME_SCALE-sped-up for the same reason the old particle
     // disk was (real Keplerian speeds here are minutes-per-orbit).
+    //
+    // That differential rotation is exactly the problem for a *passive*
+    // noise field with nothing re-injecting large-scale structure: Ω(r)
+    // differs between any two radii, so their relative phase (∝ ΔΩ·t) grows
+    // without bound — after a few minutes at VISUAL_TIME_SCALE, radii just a
+    // percent apart have already sheared a full turn out of phase with each
+    // other. The noise texture doesn't just get "streaky", it decorrelates
+    // pixel-to-pixel, and averaging over decorrelated noise converges to its
+    // flat mean — reported by the user as the disk turning smooth/homogeneous
+    // after being open a while, confirmed by forcing uTime far ahead (via a
+    // temporary performance.now() offset, not a real multi-minute wait) and
+    // watching the same washout happen instantly. This isn't a float
+    // precision bug (uTime stays well within exact-integer range for float32
+    // at these magnitudes) — it's an inherent property of shearing a static
+    // pattern forever with no renewal, same mechanism that turns a swirl of
+    // cream in coffee into a uniform color given enough stirring.
+    //
+    // Fix: never let any single sample's "time since last reset" grow past
+    // FLOW_RESET_PERIOD. Two copies of the same flow, at phases half a
+    // period apart, cross-faded by a triangle weight so whichever is
+    // fresher dominates — the classic double-buffered flow-map technique.
+    // weight0 + weight1 == 1 identically (triangle(x) + triangle(fract(x +
+    // 0.5)) — the phase-shifted one — always sums to 1), so this is a
+    // genuine crossfade, not just an add: no brightness pop, and no visible
+    // seam at the point either buffer resets, since that's exactly when its
+    // own weight hits zero.
     float worldPhi = atan(-position.z, position.x);
     float omega = sqrt(uMass / (radius * radius * radius));
-    float flowPhi = worldPhi - omega * uTime * VISUAL_TIME_SCALE;
-    float flowU = flowPhi / (2.0 * PI) + 0.5;
     float flowV = clamp((radius - uDiskInnerRadius) / max(1e-6, uDiskOuterRadius - uDiskInnerRadius), 0.0, 1.0);
-    float flow = texture2D(uDiskFlowTexture, vec2(flowU, flowV)).r;
+
+    float cycle0 = fract(uTime / FLOW_RESET_PERIOD);
+    float cycle1 = fract(cycle0 + 0.5);
+    float weight0 = 1.0 - abs(2.0 * cycle0 - 1.0);
+    float weight1 = 1.0 - weight0;
+
+    float flowPhi0 = worldPhi - omega * (cycle0 * FLOW_RESET_PERIOD) * VISUAL_TIME_SCALE;
+    float flowPhi1 = worldPhi - omega * (cycle1 * FLOW_RESET_PERIOD) * VISUAL_TIME_SCALE;
+    float flow0 = texture2D(uDiskFlowTexture, vec2(flowPhi0 / (2.0 * PI) + 0.5, flowV)).r;
+    float flow1 = texture2D(uDiskFlowTexture, vec2(flowPhi1 / (2.0 * PI) + 0.5, flowV)).r;
+    float flow = flow0 * weight0 + flow1 * weight1;
     // No fade multiply here — the caller composites this against whatever's
     // behind the disk at this pixel (mix(behindColor, diskColor, diskFade)),
     // not toward black. See traceSchwarzschild's diskFade doc comment.

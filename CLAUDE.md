@@ -905,6 +905,50 @@ clasificación del caso) de forma aislada del render.
       - `DISK_SUPERSAMPLES` en `renderQuality.ts` sigue siendo 5 (el
         multiplicador de costo dentro de esa región no cambió) — lo que
         cambió es cuántos píxeles pagan ese multiplicador.
+15. ✅ **La turbulencia del disco deja de "morir" con el tiempo** (reportado
+    por el usuario tras el merge del ítem 14: "al recién cargar la página se
+    nota claramente el giro del disco de acreción, pero después de un tiempo
+    se vuelve homogéneo y ya no se percibe la rotación").
+    - Causa: la textura de flujo (ítem 8) samplea con una fase
+      `worldPhi - Ω(r)·t·VISUAL_TIME_SCALE` — rotación diferencial real, Ω(r)
+      distinto en cada radio. Con `t` creciendo sin límite (`uTime` es
+      `state.clock.elapsedTime`, nunca se reinicia), la fase relativa entre
+      dos radios apenas distintos (∝ ΔΩ·t) también crece sin límite: after a
+      few minutes at `VISUAL_TIME_SCALE`, radios a un 1% de distancia ya
+      están una vuelta completa fuera de fase entre sí. El ruido no sólo se
+      ve "rayado" — se descorrelaciona píxel a píxel, y promediar ruido
+      descorrelacionado converge a su media (gris plano) — de ahí "se vuelve
+      homogéneo". No es un bug de precisión de punto flotante (`uTime`
+      permanece en el rango entero exacto de un float32 en estas
+      magnitudes) — es una propiedad inherente de cizallar un patrón estático
+      para siempre sin ningún mecanismo que reponga estructura a gran escala
+      (el mismo motivo por el que un remolino de crema en el café termina en
+      un color uniforme si se revuelve lo suficiente).
+    - Confirmado sin esperar minutos reales: se parcheó temporalmente
+      `performance.now()` en la consola del navegador para sumarle un offset
+      grande (probado con +400s, +3000s y +200,000s) y se observó el mismo
+      lavado hacia el gris en cuestión de un frame — validando la hipótesis
+      del mecanismo antes de tocar el shader, y sirviendo después para
+      verificar el fix a magnitudes de tiempo que nunca ocurrirían esperando
+      de verdad.
+    - Fix: técnica estándar de "flow map" con dos copias — en vez de una sola
+      muestra con fase `Ω(r)·t` sin límite, se toman dos muestras cuyo
+      "tiempo desde el último reinicio" nunca supera `FLOW_RESET_PERIOD`
+      (48s, constante en `LensedBackground.tsx`), desfasadas medio período
+      entre sí, mezcladas con un peso triangular (`weight0 + weight1 == 1`
+      siempre, por construcción) para que la copia más "fresca" domine — así
+      nunca hay un salto visible en el instante en que cualquiera de las dos
+      copias reinicia (su propio peso llega a cero justo ahí). El
+      cizallamiento sigue ocurriendo (es genuinamente rotación diferencial
+      real, visible y correcto) pero nunca llega a descorrelacionarse del
+      todo antes de refrescarse.
+    - Verificado con el mismo truco de `performance.now()`: a +3000s y a
+      +200,000,000ms (~55 horas simuladas) el disco sigue mostrando
+      turbulencia claramente visible cerca del ISCO, con movimiento continuo
+      frame a frame (comparado contra un segundo screenshot tomado 2s
+      después, en el mismo offset) — sin señales de degradación a ninguna
+      magnitud de tiempo probada. 84/84 tests, build y lint limpios, sin
+      errores de consola.
 
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
