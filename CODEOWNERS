@@ -1,0 +1,5 @@
+# Code owners for bh-simulator.
+# This file makes "who can approve" a GitHub-enforced rule, not just convention.
+# See branch protection on `main`: PRs require review from a listed owner.
+
+* @felipefunes
