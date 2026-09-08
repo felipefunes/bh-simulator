@@ -13,46 +13,58 @@ import { add, cross, dot, length, normalize, scale, sub, type Vec3 } from './vec
 // flattening — is cheaply reproducible without integrating the real thing.
 // kerrLensing.ts stays exactly as rigorous as before; it's just not what
 // draws the picture anymore.
+//
+// First version of this varied each ray's *mass* (effectiveMassForRay,
+// removed — see git history) continuously across the screen, calibrated so
+// an equatorial ray reproduced the exact real critical impact parameter.
+// That reintroduced a version of exactly the problem "Modo Visual" itself
+// was meant to solve: null geodesics that wind multiple times near the
+// photon sphere are extremely sensitive to mass, so even a smooth,
+// continuous per-pixel mass variation makes neighboring pixels resolve to
+// wildly different winding counts there — visible as dashed/aliased
+// concentric arcs fanning out from the shadow at high spin (reported by the
+// user; reproduced and confirmed absent at spin=0). Two attempts to tune
+// this away (a smoother sinAngle² blend to remove a derivative kink at the
+// pole; damping the bias magnitude to 30%) both left the artifact visually
+// unchanged — it isn't proportional to the bias or its smoothness, it's a
+// consequence of varying mass *at all* in the delicate near-photon-sphere
+// regime, at any strength.
+//
+// This version never varies mass in the trace itself — every ray always
+// uses the *true* mass, so the bending/photon-ring behavior is byte-for-byte
+// what spin=0 already had (proven artifact-free). Instead, only the final
+// capture/escape *decision* for rays that would otherwise show background is
+// overridden, by comparing the ray's impact parameter against the real
+// interpolated critical value — retrogradeCriticalImpactParameter's doc
+// comment explains why this only works cleanly for retrograde (shadow
+// grows: some escaping rays get reclassified as captured, trivial, no
+// direction needed) and not prograde (shadow would need to shrink: some
+// genuinely-captured rays would need a fake escape trajectory, which has no
+// principled answer). Accepted trade-off, confirmed with the user: the
+// shadow grows on the retrograde side and stays exactly Schwarzschild-sized
+// on the prograde side, rather than the fully bidirectional (but broken)
+// flattening the first version attempted.
 
 const SCHWARZSCHILD_CRITICAL_IMPACT_PARAMETER = 3 * Math.sqrt(3)
 
 /**
- * Effective mass fed to the (otherwise unmodified) Schwarzschild tracer, in
- * place of a true Kerr integration, to fake the one visual signature of spin
- * people actually recognize on sight: the shadow's asymmetric flattening —
- * smaller/tighter on the side where photons orbit prograde, larger on the
- * retrograde side. See traceVisualSpinRay's doc comment for the motivation
- * (this replaces the expensive Carter-constant Kerr integration for
- * rendering, which is what was tipping GPU cost over — physics/kerrLensing.ts
- * stays intact as the rigorous, just-not-used-for-rendering reference).
- *
- * sinAngle is signed and in [-1, 1]: how "equatorial" this specific ray's
- * orbital plane is relative to the spin axis (+1 fully equatorial and
- * prograde, -1 fully equatorial and retrograde, 0 exactly polar). Frame
- * dragging is strongest at the equator and vanishes on the spin axis, so the
- * bias is scaled by |sinAngle| — a polar ray (sinAngle=0) gets the true mass
- * back exactly, matching that physical vanishing.
- *
- * Calibration: at sinAngle = ±1 (a ray confined to the equatorial plane),
- * this returns the mass that makes Schwarzschild's own critical impact
- * parameter (3√3 · mass) exactly equal the *real*, exact Kerr equatorial
- * critical impact parameter for that spin and direction (criticalImpactParameter,
- * itself derived from the already-verified photon sphere radius) — not a
- * guessed constant. Between the pole and the equator, this linearly
- * interpolates in |sinAngle|; real GR doesn't actually interpolate impact
- * parameters this way, but it's the deliberate "less rigorous, more visual"
- * approximation this trades for — smooth, continuous, and exact at both
- * ends (pole and equator).
+ * The critical impact parameter used to decide capture for a ray with this
+ * sinAngle — equal to the plain Schwarzschild value (3√3·mass) except for
+ * retrograde rays (sinAngle < 0), where it grows smoothly (sinAngle²,
+ * vanishing at the pole where frame dragging genuinely vanishes too) toward
+ * the real Kerr equatorial retrograde critical impact parameter as
+ * sinAngle → -1. Prograde/polar rays (sinAngle >= 0) and spin <= 0 always
+ * get the unbiased Schwarzschild value back — see this module's file-level
+ * comment for why only the retrograde (growing) direction is handled here.
  */
-export function effectiveMassForRay(mass: number, spin: number, sinAngle: number): number {
-  if (spin === 0 || sinAngle === 0) return mass
+export function retrogradeCriticalImpactParameter(mass: number, spin: number, sinAngle: number): number {
+  const schwarzschildCrit = SCHWARZSCHILD_CRITICAL_IMPACT_PARAMETER * mass
+  if (spin <= 0 || sinAngle >= 0) return schwarzschildCrit
 
-  const direction = sinAngle > 0 ? 'prograde' : 'retrograde'
-  const bCritReal = criticalImpactParameter({ mass, spin, charge: 0 }, direction)
-  if (bCritReal === null) return mass
+  const bCritRetrograde = criticalImpactParameter({ mass, spin, charge: 0 }, 'retrograde')
+  if (bCritRetrograde === null) return schwarzschildCrit
 
-  const equatorialMass = (Math.abs(bCritReal) / SCHWARZSCHILD_CRITICAL_IMPACT_PARAMETER) * mass
-  return mass + (equatorialMass - mass) * Math.abs(sinAngle)
+  return schwarzschildCrit + (Math.abs(bCritRetrograde) - schwarzschildCrit) * sinAngle * sinAngle
 }
 
 export interface VisualSpinDiskBounds {
@@ -76,31 +88,27 @@ export interface VisualSpinTraceOptions {
 }
 
 /**
- * Traces a light ray using the plain Schwarzschild integrator (fast, robust,
- * never had the near-photon-sphere precision problems the full Carter-constant
- * Kerr integration in kerrLensing.ts did, which is why that integrator has
- * been dropped from rendering — see this module's file-level comment), but
- * with a per-ray effective mass (effectiveMassForRay) standing in for the
- * real Kerr deflection — this is the "Modo Visual" from the roadmap, scoped
- * down to just the shadow shape.
+ * Traces a light ray using the plain Schwarzschild integrator, always at the
+ * *true* mass (see this module's file-level comment for why varying it per
+ * ray was reverted) — bending, the disk crossing, and the photon-ring
+ * behavior are all exactly what a spin=0 render already had, for every
+ * pixel, regardless of spin.
  *
- * horizonRadius is passed through as the *real*, exact Kerr–Newman horizon
- * size (from physics/metric.ts), not derived from the effective mass — the
- * capture/escape boundary for a Schwarzschild ray is governed by comparing
- * its impact parameter to 3√3·(effective mass), essentially independent of
- * the specific horizonRadius value as long as it stays below that effective
- * photon sphere (verified: the real horizon is always ≤ 2·mass, while the
- * effective photon sphere at the most extreme prograde bias is still
- * comfortably larger, ~1.15·mass at exact extremal spin — see
- * visualSpinLensing.test.ts). So the shadow's actual capture threshold ends
- * up governed by the calibrated effective mass, not accidentally clipped by
- * an inconsistent horizon value.
+ * The only place spin enters is a post-hoc override, applied only when the
+ * ray would otherwise show the background (not already captured, not a disk
+ * hit — the disk itself already uses the real Kerr–Newman ISCO/horizon via
+ * physics/orbits.ts, unrelated to this): if the ray's impact parameter falls
+ * under retrogradeCriticalImpactParameter's (sinAngle-dependent) threshold,
+ * it's reclassified as captured instead of sampling the background. This is
+ * always a no-op for prograde/polar rays (that function returns the plain
+ * Schwarzschild value there, which is exactly what the unbiased trace above
+ * already used to decide captured/escaped) — the shadow only ever grows,
+ * never shrinks, in this version.
  *
  * Charge is deliberately ignored here (per the roadmap's "Modo Visual"
  * decision) — its effect on a ray's path is visually negligible, and it
  * already affects the shadow/disk *sizes* correctly via the exact metric
- * formulas used elsewhere (physics/metric.ts, physics/orbits.ts) — only the
- * bending itself is approximated.
+ * formulas used elsewhere (physics/metric.ts, physics/orbits.ts).
  */
 export function traceVisualSpinRay(
   { mass, spin, horizonRadius }: { mass: number; spin: number; horizonRadius: number },
@@ -130,13 +138,11 @@ export function traceVisualSpinRay(
   const b = length(impactVec)
   const sinAngle = b > 1e-9 ? dot(impactVec, spinAxis) / b : 0
 
-  const effectiveMass = effectiveMassForRay(mass, spin, sinAngle)
-
   const schwDisk: SchwarzschildDiskBounds | undefined = disk
     ? { e1, e2, innerRadius: disk.innerRadius, outerRadius: disk.outerRadius }
     : undefined
 
-  const result = traceSchwarzschildRay({ mass: effectiveMass, horizonRadius }, r0, rdRadial, rdTangentialLen, {
+  const result = traceSchwarzschildRay({ mass, horizonRadius }, r0, rdRadial, rdTangentialLen, {
     maxSteps,
     dPhi,
     maxRadius,
@@ -145,6 +151,10 @@ export function traceVisualSpinRay(
 
   if (result.diskHit) return { captured: false, diskHit: result.diskHit }
   if (result.captured) return { captured: true }
+
+  if (b < retrogradeCriticalImpactParameter(mass, spin, sinAngle)) {
+    return { captured: true }
+  }
 
   const direction = add(scale(e1, result.direction!.e1), scale(e2, result.direction!.e2))
   return { captured: false, direction }

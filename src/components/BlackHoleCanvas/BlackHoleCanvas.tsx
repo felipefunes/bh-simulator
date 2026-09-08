@@ -15,6 +15,23 @@ import { LensedBackground } from './LensedBackground'
 // disk stays uniformly hot-looking across its whole visible range.
 const DISK_OUTER_TO_INNER_RATIO = 10
 
+// The real (prograde) ISCO shrinks with spin, down to the horizon itself at
+// exact extremal spin — physically correct, but LensedBackground.tsx's disk
+// crossing check runs against the *Schwarzschild* photon sphere (3M; Modo
+// Visual's ray bending never varies with spin — see that file's file-level
+// comment), not the real, smaller Kerr one. Letting the disk's inner edge
+// get that close to a photon sphere it's no longer consistent with reproduced
+// exactly the kind of under-resolved-crossing aliasing PR8 already fixed
+// once for Kerr's own integrator (a dashed/notched disk image) — found via
+// visual QA at high spin (reported as "comportamientos extraños al aumentar
+// el spin"), confirmed by bisecting away every other spin-dependent input
+// (the retrograde shadow-growth override, the horizon radius) until only
+// this one remained. Clamping the disk to never get closer than this keeps
+// it a safe distance from the mismatched photon sphere; it does mean the
+// disk stops shrinking further at very high spin instead of continuing all
+// the way to the horizon like the real ISCO would.
+const MIN_DISK_INNER_RADIUS_TO_MASS_RATIO = 4
+
 const ZOOM_IN_SCALE = 0.8
 const ZOOM_OUT_SCALE = 1.25
 
@@ -30,8 +47,12 @@ export function BlackHoleCanvas() {
 
   // iscoRadius is only a closed form for Schwarzschild/Kerr (charge = 0, see
   // physics/orbits.ts); Reissner-Nordström/Kerr-Newman fall back to an
-  // approximate multiple of the horizon until that closed form exists.
-  const innerRadius = iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2
+  // approximate multiple of the horizon until that closed form exists. See
+  // MIN_DISK_INNER_RADIUS_TO_MASS_RATIO's doc comment for the outer Math.max.
+  const innerRadius = Math.max(
+    iscoRadius(params) ?? (horizons?.outer ?? params.mass) * 2,
+    MIN_DISK_INNER_RADIUS_TO_MASS_RATIO * params.mass,
+  )
   const outerRadius = innerRadius * DISK_OUTER_TO_INNER_RATIO
 
   // Same closed-form-with-fallback pattern as innerRadius above, for the

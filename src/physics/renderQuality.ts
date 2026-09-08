@@ -17,6 +17,30 @@ export interface IntegratorQuality {
 // frame dragging), so this quality selector applies uniformly regardless of
 // spin — a spinning hole is no longer a special, more expensive case.
 
+// DISK_SUPERSAMPLES follows that same "fixed regardless of quality" pattern,
+// for the same reason KERR_STEPS did: it was first added (see git history)
+// gated to "high" only, as a genuine quality/performance trade-off — but a
+// user report reproduced the exact aliasing it fixes (a dashed/cross-hatched
+// patch right where the disk's edge grazes a higher-order lensed image of
+// itself) at "low" and "medium" too, from a below-the-plane camera angle.
+// Isolated by testing DISK_SUPERSAMPLES=5 at "medium"'s cheaper schwSteps,
+// and separately at "low"'s (the coarsest integrator), with no other change:
+// the artifact disappeared completely both times, regardless of integrator
+// precision — proving this is purely single-ray aliasing, not an
+// under-resolved-integration issue like the Kerr one above. So, matching the
+// Kerr precedent: reducing it isn't a softer-but-cheaper option, it's a
+// correctness bug, and "quality" only governs schwSteps/schwDPhi and pixel
+// ratio (pixelRatioForQuality below) — the axes safe to reduce.
+//
+// A first version paid this 5x cost on *every* pixel at every quality level —
+// rejected (before merge) for tanking performance at "medium", since it ran
+// full-cost even over plain background and the wide, uncompressed part of
+// the disk that was never at risk. LensedBackground.tsx's main() now gates
+// it to pixels near the critical impact parameter (the strong-lensing region
+// where this compression actually happens), so this constant is still always
+// 5 — it's paid by far fewer pixels, not a smaller multiplier.
+export const DISK_SUPERSAMPLES = 5
+
 // "medium" reproduces the original, pre-quality-control Schwarzschild
 // constants (see git history of LensedBackground.tsx) exactly, so existing
 // renders don't shift under the default setting. Step count and step size

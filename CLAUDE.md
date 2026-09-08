@@ -704,20 +704,224 @@ clasificación del caso) de forma aislada del render.
         una estrella asomando justo en la zona de fade) en vez de un
         borde oscurecido. 82/82 tests, build y lint limpios.
 
+12. ✅ **Fix del artefacto de spin en Modo Visual** (reportado por el usuario:
+    "el issue del spin. Sigue habiendo comportamientos extraños al aumentar el
+    spin", con el pedido explícito de simplificar la física aún más si hacía
+    falta para eliminarlo — "iría simplificando la física a un punto en que
+    sólo se incorporen los cambios visuales si es que se puede"). Dos bugs
+    distintos, encontrados y resueltos en secuencia:
+    - **Bug 1 — `effectiveMassForRay` (la primera versión de Modo Visual,
+      ítem 9) producía arcos concéntricos punteados/aliased a spin alto.**
+      Dos intentos de ajuste fallaron sin cambiar el artefacto en absoluto:
+      suavizar el blend con `sinAngle²` (por si el kink de derivada en
+      `|sinAngle|` en el polo fuera la causa) y amortiguar el sesgo al 30% (por
+      si la magnitud fuera la causa). Ninguno de los dos cambió el artefacto ni
+      un poco — la causa real no era la suavidad ni la magnitud del sesgo, sino
+      variar la *masa* en absoluto cerca de la esfera de fotones: las
+      geodésicas nulas que dan varias vueltas ahí son extremadamente sensibles
+      a la masa, así que hasta una variación suave y continua por píxel separa
+      píxeles vecinos en números de vuelta completamente distintos.
+      Presentado al usuario, quien confirmó explícitamente seguir con un
+      rediseño de un solo lado (`AskUserQuestion`, opción elegida: "Sí, un solo
+      lado (recomendado)") en vez de seguir iterando sobre la variación de masa.
+      - **Rediseño**: `physics/visualSpinLensing.ts` ya no varía la masa en
+        absoluto — todo rayo se traza con la masa real, byte a byte igual que
+        spin=0 (ya probado libre de artefactos). El spin sólo entra como una
+        corrección posterior a la decisión final de captura/escape: si el
+        parámetro de impacto cae bajo `retrogradeCriticalImpactParameter`
+        (nueva función, sesgada sólo para rayos retrógrados —
+        `sinAngle < 0` — interpolando `sinAngle²` hacia el valor crítico real
+        de Kerr en el ecuador retrógrado), un rayo que habría escapado se
+        reclasifica como capturado. Los rayos prógrados/polares no cambian
+        nunca (siempre el umbral de Schwarzschild puro). Trade-off aceptado a
+        propósito: la sombra sólo crece del lado retrógrado — no puede encoger
+        limpiamente del lado prógrado (un rayo genuinamente capturado no tiene
+        una trayectoria de escape "falsa" con la que reemplazarlo con
+        principios). `LensedBackground.tsx` recibió la traducción GLSL
+        equivalente (`retrogradeCriticalImpactParameterGLSL`), reemplazando
+        `effectiveMassForRayGLSL` (eliminada) en `main()`.
+      - Testeado en vitest (`visualSpinLensing.test.ts`, reescrito): reduce a
+        Schwarzschild puro a spin=0; rayos prógrados no sesgados a ningún spin
+        (incluso entre el umbral real prógrado y el de Schwarzschild); rayos
+        retrógrados sí muestran el crecimiento de sombra (capturados entre el
+        umbral de Schwarzschild y el retrógrado real); rayo puramente polar sin
+        sesgo a cualquier spin; cruce del disco intacto.
+    - **Bug 2 — tras el rediseño, el artefacto (arcos/línea punteada) seguía
+      presente**, lo cual de hecho refutaba que la causa original
+      (`effectiveMassForRay`) fuera la causa de *este* artefacto visible en
+      particular, aunque el problema teórico que motivó el rediseño era real
+      igual. Diagnosticado por bisección — neutralizando una entrada
+      dependiente de spin a la vez, verificando en el navegador después de
+      cada una (mismo viewport, sin recargar, para evitar falsos positivos por
+      el tamaño de ventana variando entre `navigate`): override retrógrado
+      neutralizado (seguía) → `uHorizonRadius` forzado fijo (seguía) → disco
+      desactivado (el artefacto fuerte desaparecía, sólo quedaba un patrón
+      tenue y sin relación con el spin) → disco reactivado (el artefacto fuerte
+      volvía). Causa real: `BlackHoleCanvas.tsx` usa la ISCO real de Kerr
+      (`iscoRadius(params)`, que encoge hacia el horizonte a spin alto) para el
+      radio interno del disco, pero el chequeo de cruce del disco en el shader
+      corre sobre el rayo curvado por la esfera de fotones de Schwarzschild
+      pura (3M) — Modo Visual nunca varía eso. Cuando el borde interno del
+      disco encoge lo bastante para acercarse a esa esfera de fotones ya
+      desalineada, reaparece la misma clase de bug de "cruce de disco
+      sub-resuelto" que el PR 8 ya había arreglado una vez para el integrador
+      de Kerr (un disco con mordiscos/dentado).
+      - Fix: `MIN_DISK_INNER_RADIUS_TO_MASS_RATIO = 4` en
+        `BlackHoleCanvas.tsx` — el radio interno del disco es
+        `Math.max(iscoRadius(params) ?? ..., 4 * mass)`, un piso que mantiene
+        el disco a una distancia segura de la esfera de fotones de
+        Schwarzschild sin importar cuánto encoja la ISCO real con el spin.
+        Costo aceptado: el disco deja de encoger hasta el horizonte a spin
+        extremal como haría la ISCO real — se congela en ese piso en cambio.
+        Verificado probando primero un override total (`6 * mass`, ignorando
+        spin) para confirmar que el piso era la causa correcta, luego el
+        clamp menos drástico (`Math.max(ISCO real, 4*mass)`) — igual de
+        limpio, permitiendo algo de encogimiento real.
+    - Verificado en el navegador en el peor caso conocido (spin=1.00, calidad
+      "Media" y "Alta"): sin arcos, sin línea punteada, sombra asimétrica
+      (crecimiento retrógrado) todavía visible — confirma que el rediseño de
+      un solo lado sigue intacto y que el fix es el del disco, no una reversión
+      del rediseño. 83/83 tests, build y lint limpios.
+13. ✅ **Anti-aliasing del borde del disco contra sí mismo** (reportado por el
+    usuario tras revisar el fix del blur del borde externo — ítem 11: "sigo
+    viendo el borde del disco negro [...] es que es difícil verlo contra el
+    espacio, pero contra sí mismo si se nota"). No era una regresión del fade
+    del ítem 11 (ese sigue funcionando: revela el fondo real, no oscurece a
+    negro) sino un fenómeno distinto, encontrado explorando varios ángulos de
+    cámara: cerca de la sombra, la lente gravitacional puede generar una
+    *imagen de orden superior* del disco (el lado lejano, curvado por encima
+    de la sombra) comprimida angularmente en apenas un puñado de píxeles de
+    pantalla. El shader dispara un solo rayo por píxel, así que la transición
+    real (continua en el espacio del parámetro de impacto) entre "el rayo cruza
+    el disco" y "el rayo escapa limpio" puede caer entera entre un píxel y el
+    siguiente — no hay forma de que se vea gradual con un solo muestreo, sea
+    cual sea el fade aplicado. Contra el fondo (espacio, ya oscuro) ese salto es
+    invisible; junto a otra parte del disco (brillante), se lee como un borde
+    negro duro — de ahí "contra sí mismo si se nota".
+    - Se presentaron tres opciones al usuario (`AskUserQuestion`): supersampling
+      en el shader, blur/glow de post-proceso general, o dejarlo (es una
+      "dark lane" real entre dos imágenes lensadas, el mismo fenómeno detrás de
+      las franjas oscuras de renders reales de agujeros negro). El usuario
+      eligió supersampling — ataca la causa (aliasing), a diferencia de un blur
+      general que suavizaría también el borde real de la sombra (una
+      discontinuidad física genuina que no debería difuminarse).
+    - `physics/renderQuality.ts`: nuevo campo `diskSupersamples` en
+      `IntegratorQuality` — 1 (sin cambio de costo/comportamiento) en
+      "Baja"/"Media", 5 en "Alta". Mismo patrón que `schwSteps`/`schwDPhi`: el
+      selector de calidad (ítem 7) es la palanca de costo vs. fidelidad, así
+      que el render por default no cambia.
+    - `LensedBackground.tsx`: el cuerpo de `main()` (trace + color + el
+      override retrógrado del ítem 12) se extrajo a `sampleColor(rd)`, ahora
+      llamada 1 vez (sin cambio) o 5 veces (centro + 4 esquinas a un cuarto de
+      píxel de distancia, promediadas) según `uDiskSupersamples`. El desvío de
+      cada muestra usa una base tangente perpendicular al rayo central,
+      escalada por `uPixelAngularSize` (FOV vertical entre la altura del
+      render en píxeles de dispositivo, calculada una vez por frame, no por
+      rayo). La base tangente usa un vector de referencia que cambia según
+      `rd0.y` en vez de un `WORLD_UP` fijo — con cámara mirando derecho hacia
+      abajo (una vista cenital real de esta app, no un caso raro) el producto
+      cruz con un `WORLD_UP` fijo se anula para toda una franja de píxeles de
+      pantalla, no sólo uno.
+    - Verificado en vitest (`renderQuality.test.ts`: "Baja"/"Media" en 1,
+      "Alta" mayor a 1), build y lint limpios, y en el navegador (calidad
+      "Alta" renderiza sin errores de consola en varios ángulos, incluida una
+      vista casi cenital, sin regresión visual respecto a "Media"). No se
+      logró reproducir en esta sesión, píxel a píxel, el ángulo exacto de
+      cámara del screenshot original del usuario — la confirmación visual
+      definitiva de la imagen secundaria suavizándose queda pendiente de que
+      el usuario la vea en su propio ángulo tras el deploy.
+
+14. ✅ **`DISK_SUPERSAMPLES` deja de ser exclusivo de "Alta"** (reportado por el
+    usuario con una captura: un parche cruzado/punteado justo donde el borde
+    del disco roza una imagen lensada de orden superior de sí mismo, mirando
+    desde abajo del plano del disco de forma que éste cruza por arriba de la
+    sombra — "esas circunferencias perimetrales negras... desaparecen con
+    calidad alta"). Es la misma clase de aliasing del ítem 13, no un bug
+    nuevo — pero el ítem 13 sólo lo corrige en calidad "Alta"
+    (`diskSupersamples: 5` ahí, `1` en "Baja"/"Media"), así que seguía
+    apareciendo en las otras dos.
+    - Diagnóstico por aislamiento, no por inspección de código: en vez de
+      asumir que "Alta" arregla esto por su mayor precisión de integrador
+      (`schwSteps`/`schwDPhi`) o su mayor pixel ratio, se probó cada palanca
+      por separado. Subir sólo `diskSupersamples` a 5 en "Media" — sin tocar
+      `schwSteps`/`schwDPhi`/pixel ratio de "Media" — eliminó el artefacto
+      por completo. Repetido en "Baja" (el integrador más grosero de todos,
+      80 pasos): mismo resultado limpio. Conclusión: el supersampling por sí
+      solo lo arregla, sin importar la precisión del integrador — confirma
+      que es aliasing de muestreo único (ítem 13), no una integración
+      sub-resuelta como la de Kerr (ítem 8/9).
+    - Dado que reducirlo no es un trade-off de nitidez sino un bug real
+      (ruido/glitch visible), se aplicó el mismo criterio que
+      `KERR_STEPS`/`KERR_D_TAU` en su momento (ítem 8): en vez de una opción
+      barata que a veces rompe la imagen, se sacó de `IntegratorQuality` y
+      pasó a ser una constante fija (`DISK_SUPERSAMPLES = 5` en
+      `renderQuality.ts`, ya no parte del registro por nivel). El selector de
+      calidad sigue controlando `schwSteps`/`schwDPhi` y el pixel ratio (las
+      palancas que sí es seguro reducir) — el costo del supersampling ahora
+      lo paga todo nivel por igual.
+    - `LensedBackground.tsx`: el uniform `uDiskSupersamples` y su `if` en
+      `main()` se eliminaron — el promedio de 5 muestras (centro + 4 esquinas
+      a un cuarto de píxel) corre siempre, sin condicional. Simplifica el
+      shader además de arreglar el bug.
+    - Verificado: 84/84 tests (el test de `renderQuality.test.ts` que
+      comprobaba "sólo en Alta" se reemplazó por uno que confirma que
+      `DISK_SUPERSAMPLES` no depende del nivel), build y lint limpios, sin
+      errores de consola en "Baja" tras el cambio. La reproducción exacta del
+      ángulo de cámara del usuario (justo debajo del plano del disco, con
+      zoom) costó bastante lograr en el navegador — los controles de órbita
+      quedan "pegados" en el polo exacto (cenital) si se arrastra sólo en esa
+      dirección, y hace falta arrastrar en la dirección opuesta para salir de
+      ahí — pero una vez reproducido, permitió confirmar el diagnóstico por
+      aislamiento de variables arriba, que es la evidencia real del fix (más
+      confiable que una comparación visual antes/después sujeta a variación
+      de encuadre).
+    - **Rechazado por el usuario tras probarlo**: "el costo en performance
+      fue demasiado alto. En calidad media el navegador casi explota". El
+      diagnóstico de aislamiento de variables era correcto (el supersampling
+      sí arregla el bug, sin importar la precisión del integrador), pero la
+      conclusión de implementación no — pagar 5x en *todo* píxel de la
+      pantalla, en los tres niveles, es un costo real y notorio en un shader
+      que ya es el cuello de botella conocido de todo este proyecto (ver
+      ítems 6/7/8/9), no sólo un detalle de benchmark. Verificado sólo
+      "no hay errores de consola" antes de recomendar aplicarlo a todo
+      nivel, sin medir el costo real en cuadros por segundo — ese fue el
+      hueco en la verificación.
+      - **Fix real**: en vez de pagar el costo en cada píxel, `main()` ahora
+        lo paga sólo en los píxeles cuyo parámetro de impacto cae cerca del
+        valor crítico (`DISK_SUPERSAMPLE_IMPACT_MARGIN_RATIO = 0.35` del
+        valor crítico) — que es, por construcción, exactamente la región de
+        lente fuerte donde las imágenes de orden superior se comprimen
+        (ninguna imagen múltiple existe lejos de la esfera de fotones), así
+        que no es una heurística aproximada sino el criterio geométrico
+        correcto para dónde puede ocurrir este aliasing en absoluto. El
+        resto de la pantalla (fondo, la mayor parte del disco) vuelve al
+        costo de un solo rayo por píxel, igual que antes del ítem 13.
+      - Verificado visualmente coloreando temporalmente de rojo la región
+        con supersampling activo (mismo patrón de diagnóstico que en PRs
+        anteriores — colorear qué camino de código atiende cada píxel): un
+        anillo delgado alrededor de la sombra, ni remotamente toda la
+        pantalla, confirmando que el costo real quedó acotado a esa región
+        antes de revertir el color de diagnóstico.
+      - `DISK_SUPERSAMPLES` en `renderQuality.ts` sigue siendo 5 (el
+        multiplicador de costo dentro de esa región no cambió) — lo que
+        cambió es cuántos píxeles pagan ese multiplicador.
+
 Este roadmap es una guía, no un contrato — el orden puede ajustarse PR a PR según lo que
 se aprenda en el camino (igual que en galaxy-simulator).
 
 ## Known issues
 
-- **Artefacto residual cerca del eje de spin** (línea punteada / arcos tenues, spin
-  alto + cámara en ángulo pronunciado): sobrevivió a cinco rondas de fixes reales
-  durante el PR 6 (cada una documentada arriba, en la sección de ese PR) y se aceptó
-  como limitación conocida en vez de seguir iterando indefinidamente. Detalle completo,
-  hipótesis pendientes y cómo reproducir en
-  [issue #7](https://github.com/felipefunes/bh-simulator/issues/7). Probablemente se
-  retome junto con el ítem 7 del roadmap (controles de calidad) o con una
-  reformulación del integrador de Kerr que evite la coordenada singular del polo
-  (sustitución μ=cosθ) en vez de parchar `POLE_GUARD` caso por caso.
+Ninguno conocido actualmente. El artefacto histórico cerca del eje de spin (línea
+punteada / arcos tenues a spin alto, [issue #7](https://github.com/felipefunes/bh-simulator/issues/7))
+quedó obsoleto por el reemplazo completo del integrador de Kerr por Modo Visual (ítem 9):
+la causa original (`POLE_GUARD`/la coordenada singular del polo θ en el integrador de
+Carter) ya no existe en absoluto en el código que renderiza — Modo Visual traza con el
+integrador 2D de Schwarzschild, que no tiene coordenada θ ni concepto de polo. Es una
+garantía estructural (el camino de código se eliminó, no se parchó) y no algo que haga
+falta re-verificar caso por caso. Los ítems 12 y 13 documentan artefactos visualmente
+similares pero de causas completamente distintas (un desajuste de radios entre el disco
+y la esfera de fotones; aliasing de muestreo único cerca de imágenes lensadas de orden
+superior), ya resueltos.
 
 ## Deploy
 
